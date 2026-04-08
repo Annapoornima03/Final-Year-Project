@@ -1,6 +1,7 @@
 streamlit
 pdfplumber
 pandas
+dateparser
 rapidfuzz
 spacy
 numpy
@@ -8,3 +9,4 @@ easyocr
 pdf2image
 plotly
 groq
+Pillow
