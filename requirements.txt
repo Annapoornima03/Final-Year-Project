@@ -1,0 +1,10 @@
+streamlit
+pdfplumber
+pandas
+rapidfuzz
+spacy
+numpy
+easyocr
+pdf2image
+plotly
+groq
