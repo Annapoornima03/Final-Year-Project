@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import html
 import pdfplumber
 import pandas as pd
 import dateparser
@@ -104,8 +105,10 @@ DEFAULT_CONFIG = {
     "TOP_N_CANDIDATES": 5,
     "EMAIL_BATCH_SIZE": 10,
     "EMAIL_DELAY": 1.0,
-    "GROQ_API_KEY": st.secrets.get("GROQ_API_KEY", ""),
+    "GROQ_API_KEY": app_config.get("GROQ_API_KEY", ""),
     "GROQ_MODEL": "llama-3.3-70b-versatile",
+    "GROQ_FALLBACK_MODEL": "llama-3.1-8b-instant",
+    "GROQ_MAX_RETRIES": 3,
     "HR_MANAGER_NAME": "Hiring Manager",
     "COMPANY_NAME": "Organization",
     "NOTICE_PERIOD_DAYS": 30,
@@ -369,7 +372,51 @@ class SchedulingManager:
 class LLMResumeAnalyzer:
     def __init__(self, config):
         self.config = config
-        self.groq_client = Groq(api_key=config.get("GROQ_API_KEY")) if config.get("GROQ_API_KEY") else None
+        api_key = config.get("GROQ_API_KEY")
+        max_retries = config.get("GROQ_MAX_RETRIES", 3)
+        self.groq_client = Groq(api_key=api_key, max_retries=max_retries) if api_key else None
+    
+    def _call_groq(self, prompt: str, system_message: str = "You are an expert HR analyst.", 
+                  json_mode: bool = False, temperature: float = 0.3) -> Optional[Any]:
+        """Helper method to call Groq with automatic fallback on rate limits"""
+        if not self.groq_client:
+            return None
+
+        primary_model = self.config.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+        fallback_model = self.config.get("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant")
+        
+        models_to_try = [primary_model, fallback_model]
+        
+        for i, model_name in enumerate(models_to_try):
+            try:
+                params = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": system_message},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": temperature
+                }
+                if json_mode:
+                    params["response_format"] = {"type": "json_object"}
+                
+                completion = self.groq_client.chat.completions.create(**params)
+                return completion.choices[0].message.content
+            except Exception as e:
+                error_str = str(e).lower()
+                if "rate_limit_exceeded" in error_str or "429" in error_str:
+                    if i < len(models_to_try) - 1:
+                        logging.warning(f"Model {model_name} rate limited. Switching to fallback {models_to_try[i+1]}...")
+                        time.sleep(1) # Small pause before retry
+                        continue
+                    else:
+                        logging.error(f"All Groq models rate limited: {e}")
+                else:
+                    logging.error(f"Groq API error with {model_name}: {e}")
+                    if i < len(models_to_try) - 1:
+                        continue # Try fallback for other errors too
+                break
+        return None
     
     def extract_text_from_pdf(self, uploaded_file):
         bytes_data = uploaded_file.getvalue()
@@ -403,10 +450,14 @@ class LLMResumeAnalyzer:
                     with pdfplumber.open(io.BytesIO(bytes_data)) as pdf:
                         pages_text = []
                         for page in pdf.pages:
-                            page_text = page.extract_text()
+                            # Deduplicate overlapping characters (fixes "Aa Sshh" issue)
+                            deduped_page = page.dedupe_chars(tolerance=1)
+                            page_text = deduped_page.extract_text()
                             if page_text:
                                 pages_text.append(page_text)
-                        text = "\n".join(pages_text)
+                        raw_text = "\n".join(pages_text)
+                        # Clean artifacts like "Y . A S H A" or "doubled letters"
+                        text = self._fix_extraction_artifacts(raw_text)
                     
                     if ocr_reader and len(text.strip()) < 200:
                         try:
@@ -430,6 +481,31 @@ class LLMResumeAnalyzer:
         
         return text.strip()
     
+    def _fix_extraction_artifacts(self, text: str) -> str:
+        """Heuristic to fix common PDF extraction issues like spaced out names."""
+        if not text:
+            return ""
+            
+        # 1. Remove noise backticks (often appear between characters in PDFs)
+        text = text.replace("`", "")
+            
+        # 2. Fix spaced-out letters (e.g., "Y . A S H A", "T N", "A S H A N M U G A")
+        # Now handles 2+ single characters separated by single spaces
+        def join_spaced_letters(match):
+            spaced_text = match.group(0)
+            # Remove the spaces but keep the characters
+            joined = spaced_text.replace(" ", "")
+            return joined
+
+        # Apply spaced letters fix: look for (single char + space) repeated 1+ times
+        # followed by one more single char. This catches "T N", "U S A", etc.
+        text = re.sub(r'\b(?:[A-Z\.]\s){1,}[A-Z\.]\b', join_spaced_letters, text)
+        
+        # 3. Collapse multiple spaces into single spaces (but preserve newlines)
+        text = re.sub(r'[ \t]{2,}', ' ', text)
+        
+        return text
+
     def analyze_resume_with_llm(self, resume_text: str, jd_text: str, required_skills: List[str], 
                                salary_range: Optional[Dict[str, Any]] = None, custom_criteria: str = "") -> Dict[str, Any]:
         if not self.groq_client or not jd_text:
@@ -483,7 +559,15 @@ Also extract:
 - Hiring recommendation (2-3 sentences)
 - Interview focus areas (3-4 topics to probe)
 
-Return ONLY valid JSON with these exact keys:
+Return ONLY valid JSON with these exact keys. 
+
+STRICT REQUIREMENT: The candidate's identity (Name, Email, Phone, Location) is usually at the very top of the document. Please prioritize the first 15 lines for these details.
+
+STRICT CASE FIDELITY: Maintain the EXACT capitalization/case of all extracted fields as written in the resume. 
+- If the name is 'Y.ASHA JOSEMINE', you must return 'Y.ASHA JOSEMINE'. 
+- Do NOT normalize to 'Yasha Josemine' or 'Y.asha Josemine'.
+- Do NOT alter punctuation or spacing within names.
+
 {{
   "technical_score": float,
   "experience_score": float,
@@ -510,16 +594,12 @@ Return ONLY valid JSON with these exact keys:
 }}"""
         
         try:
-            assert self.groq_client is not None
-            completion = self.groq_client.chat.completions.create(
-                model=self.config.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                temperature=0.3
-            )
-            return json.loads(completion.choices[0].message.content)
+            content = self._call_groq(prompt, json_mode=True)
+            if content:
+                return json.loads(content)
+            return self._fallback_analysis(resume_text, required_skills)
         except Exception as e:
-            logging.error(f"LLM analysis failed: {e}")
+            logging.error(f"LLM analysis processing failed: {e}")
             return self._fallback_analysis(resume_text, required_skills)
     
     def _fallback_analysis(self, resume_text: str, required_skills: List[str]) -> Dict:
@@ -534,7 +614,18 @@ Return ONLY valid JSON with these exact keys:
         phone = phones[0] if phones else ""
         
         lines = [l.strip() for l in resume_text.split('\n') if l.strip()]
-        name = lines[0] if lines else "Candidate"
+        
+        # Smarter name fallback: Skip common headers and pick first high-quality line
+        headers = ["resume", "cv", "curriculum vitae", "biodata", "contact", "summary"]
+        name = "Candidate"
+        for line in lines[:10]:
+            clean_line = line.lower()
+            if any(h in clean_line for h in headers) or len(line) < 3:
+                continue
+            # If line is likely a name (not a sentence, just words)
+            if len(line.split()) <= 5:
+                name = line # Preserve exact case
+                break
         
         skills_found = [s for s in required_skills if s.lower() in text_lower]
         
@@ -549,7 +640,7 @@ Return ONLY valid JSON with these exact keys:
             "experience_score": min(years_exp * 10, 100),
             "education_score": 60,
             "fit_score": 55,
-            "name": name,
+            "name": name, # preserved case
             "email": email,
             "phone": phone,
             "location": "Unknown",
@@ -602,41 +693,35 @@ Format the output as a professional markdown report with:
 Keep it under 600 words but be specific and actionable."""
         
         try:
-            assert self.groq_client is not None
-            completion = self.groq_client.chat.completions.create(
-                model=self.config.get("GROQ_MODEL"),
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.5
-            )
-            return completion.choices[0].message.content
+            content = self._call_groq(prompt, temperature=0.5)
+            if content:
+                return content
+            return "Error generating comparison report - all attempts failed."
         except Exception as e:
             logging.error(f"Comparison report failed: {e}")
             return "Error generating comparison report"
     
     def chat_with_resume(self, resume_text: str, candidate_name: str, question: str, conversation_history: Optional[List[Dict[str, Any]]] = None) -> str:
-        if not self.groq_client:
-            return "Chat functionality requires LLM configuration."
-        
-        messages = [
-            {"role": "system", "content": f"You are an HR assistant helping to evaluate a candidate named {candidate_name}. Answer questions based on their resume. Be concise and professional."}
-        ]
-        
-        if conversation_history:
-            messages.extend(conversation_history)
-        
-        messages.append({
-            "role": "user", 
-            "content": f"Resume:\n{str(resume_text)[:4000]}\n\nQuestion: {question}"
-        })
-        
         try:
-            assert self.groq_client is not None
-            completion = self.groq_client.chat.completions.create(
-                model=self.config.get("GROQ_MODEL"),
-                messages=messages,
-                temperature=0.4
-            )
-            return completion.choices[0].message.content
+            # chat_with_resume needs to preserve history, so we'll adapt _call_groq 
+            # Or just call self.groq_client directly if we want history, but let's 
+            # keep it simple for now and use the prompt-based approach if _call_groq is preferred.
+            # Actually _call_groq takes a system_message and a prompt. 
+            # For history, we can join it into the prompt.
+            
+            history_str = ""
+            if conversation_history:
+                for msg in conversation_history:
+                    role = "Candidate" if msg['role'] == 'assistant' else "User"
+                    history_str += f"{role}: {msg['content']}\n"
+            
+            full_prompt = f"Resume:\n{str(resume_text)[:4000]}\n\nConversation History:\n{history_str}\n\nQuestion: {question}"
+            system_msg = f"You are an HR assistant helping to evaluate a candidate named {candidate_name}. Answer questions based on their resume. Be concise and professional."
+            
+            content = self._call_groq(full_prompt, system_message=system_msg, temperature=0.4)
+            if content:
+                return content
+            return "Error: Could not get response from LLM after multiple attempts."
         except Exception as e:
             return f"Error: {str(e)}"
     
@@ -693,17 +778,12 @@ Keep it under 600 words but be specific and actionable."""
             return FALLBACK
 
         try:
-            assert self.groq_client is not None
-            completion = self.groq_client.chat.completions.create(
-                model=self.config.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                temperature=0.6
-            )
-            result = json.loads(completion.choices[0].message.content)
-            questions = result.get("questions", [])
-            if isinstance(questions, list) and questions:
-                return questions
+            content = self._call_groq(prompt, json_mode=True, temperature=0.6)
+            if content:
+                result = json.loads(content)
+                questions = result.get("questions", [])
+                if isinstance(questions, list) and questions:
+                    return questions
             return FALLBACK
         except Exception as e:
             logging.error("Error calling LLM for interview questions: %s", e)
@@ -762,6 +842,8 @@ def export_candidate_data(candidates: List[Dict[str, Any]], format: str = "detai
         return pd.DataFrame(data)
 
 def render_login():
+    logout_notice = st.session_state.pop("logout_notice", None)
+
     st.markdown("""
         <style>
         [data-testid="stForm"] {
@@ -827,6 +909,9 @@ def render_login():
     
     with col_main:
         users = load_users()
+
+        if logout_notice:
+            st.success(logout_notice)
         
         with st.form("login_form"):
             st.markdown("""
@@ -856,6 +941,82 @@ def render_login():
                         st.rerun()
                     else:
                         st.error("❌ Invalid username or password. Please check your credentials and try again.")
+
+
+def logout_user():
+    email_manager = st.session_state.get("email_manager")
+    if email_manager:
+        try:
+            email_manager.disconnect()
+        except Exception as exc:
+            logging.warning(f"Error while disconnecting email manager during logout: {exc}")
+
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+
+    st.session_state.logged_in = False
+    st.session_state.logout_notice = "You have been logged out successfully."
+    st.rerun()
+
+
+if hasattr(st, "dialog"):
+    @st.dialog("Confirm Logout")
+    def render_logout_dialog():
+        st.markdown("### Are you sure you want to logout?")
+        st.caption("Your active account will be cleared and you will be redirected to the login page.")
+
+        col_cancel, col_confirm = st.columns(2)
+        if col_cancel.button("Cancel", key="logout_cancel_dialog", use_container_width=True):
+            st.session_state.show_logout_confirm = False
+            st.rerun()
+        if col_confirm.button("Logout", key="logout_confirm_dialog", type="primary", use_container_width=True):
+            st.session_state.show_logout_confirm = False
+            logout_user()
+
+
+def render_logout_control():
+    current_user = st.session_state.get("current_user", "HR User")
+    safe_current_user = html.escape(str(current_user))
+
+    with st.container(key="logout_panel"):
+        st.markdown(
+            f"""
+            <div class="logout-card">
+                <div class="logout-kicker">Signed-In Account</div>
+                <div class="logout-user-row">
+                    <div>
+                        <div class="logout-user-name">{safe_current_user}</div>
+                    </div>
+                    <div class="logout-status-pill">Secure</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if st.button("Log Out", key="logout_button", use_container_width=True):
+            if hasattr(st, "dialog"):
+                st.session_state.show_logout_confirm = True
+            else:
+                st.session_state.show_logout_inline_confirm = True
+            st.rerun()
+
+        if st.session_state.get("show_logout_inline_confirm", False):
+            st.markdown(
+                """
+                <div class="logout-confirm-box">
+                    Are you sure you want to logout?
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            col_cancel, col_confirm = st.columns(2)
+            if col_cancel.button("Cancel", key="logout_cancel_inline", use_container_width=True):
+                st.session_state.show_logout_inline_confirm = False
+                st.rerun()
+            if col_confirm.button("Logout", key="logout_confirm_inline", type="primary", use_container_width=True):
+                st.session_state.show_logout_inline_confirm = False
+                logout_user()
 
 
 def main():
@@ -900,6 +1061,86 @@ def main():
     }
     
     /* Premium Static Buttons — no hover animation */
+    .st-key-logout_panel {
+        position: sticky;
+        top: 0.5rem;
+        z-index: 30;
+        padding-bottom: 0.85rem;
+        margin-bottom: 1rem;
+        background: linear-gradient(180deg, rgba(248, 250, 252, 0.98), rgba(248, 250, 252, 0.94));
+    }
+    .logout-card {
+        padding: 1rem 1rem 0.9rem;
+        border-radius: 18px;
+        background: linear-gradient(145deg, #0F172A 0%, #1E3A8A 58%, #2563EB 100%);
+        color: #F8FAFC;
+        border: 1px solid rgba(148, 163, 184, 0.2);
+        box-shadow: 0 16px 28px -18px rgba(15, 23, 42, 0.8);
+        margin-bottom: 0.75rem;
+    }
+    .logout-kicker {
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        color: rgba(191, 219, 254, 0.9);
+        margin-bottom: 0.85rem;
+        font-weight: 700;
+    }
+    .logout-user-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.8rem;
+    }
+    .logout-user-label {
+        font-size: 0.78rem;
+        color: rgba(226, 232, 240, 0.85);
+        margin-bottom: 0.2rem;
+    }
+    .logout-user-name {
+        font-size: 1rem;
+        font-weight: 700;
+        line-height: 1.3;
+        word-break: break-word;
+    }
+    .logout-status-pill {
+        padding: 0.42rem 0.72rem;
+        border-radius: 999px;
+        font-size: 0.74rem;
+        font-weight: 700;
+        background: rgba(255, 255, 255, 0.12);
+        border: 1px solid rgba(191, 219, 254, 0.24);
+        color: #DBEAFE;
+        white-space: nowrap;
+    }
+    .st-key-logout_panel [data-testid="stButton"] button {
+        min-height: 2.9rem;
+        border-radius: 14px !important;
+        border: 1px solid rgba(14, 116, 144, 0.18) !important;
+        background: linear-gradient(135deg, #FFFFFF 0%, #E0F2FE 100%) !important;
+        color: #0F172A !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.02em;
+        box-shadow: 0 12px 20px -18px rgba(14, 116, 144, 0.7);
+    }
+    .st-key-logout_panel [data-testid="stButton"] button:hover,
+    .st-key-logout_panel [data-testid="stButton"] button:focus,
+    .st-key-logout_panel [data-testid="stButton"] button:active {
+        background: linear-gradient(135deg, #F8FAFC 0%, #BAE6FD 100%) !important;
+        color: #0F172A !important;
+        border: 1px solid rgba(14, 116, 144, 0.24) !important;
+    }
+    .logout-confirm-box {
+        margin-top: 0.6rem;
+        margin-bottom: 0.5rem;
+        padding: 0.85rem 0.95rem;
+        border-radius: 14px;
+        background: linear-gradient(135deg, #FFF7ED 0%, #FFEDD5 100%);
+        border: 1px solid #FDBA74;
+        color: #9A3412;
+        font-size: 0.92rem;
+        font-weight: 600;
+    }
     .stButton > button {
         background: linear-gradient(135deg, #1E3A8A 0%, #2563EB 100%) !important;
         color: #ffffff !important;
@@ -992,6 +1233,7 @@ def main():
     
     # Sidebar Configuration
     with st.sidebar:
+        render_logout_control()
         
         
         st.header("  System Configuration")
@@ -2333,6 +2575,9 @@ def main():
             st.session_state.scheduling_manager = SchedulingManager()
             st.success("All data has been reset!")
             st.rerun()
+
+    if st.session_state.get("show_logout_confirm", False) and hasattr(st, "dialog"):
+        render_logout_dialog()
 
 if __name__ == "__main__":
     main()
