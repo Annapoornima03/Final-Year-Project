@@ -6,8 +6,8 @@ venv/
 .env
 
 # Config
-config.json
-users.json
+# config.json (now tracked)
+# users.json (now tracked)
 
 # IDE
 .vscode/

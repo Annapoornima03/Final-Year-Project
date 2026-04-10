@@ -1,0 +1,9 @@
+{
+    "SMTP_SERVER": "smtp.gmail.com",
+    "SMTP_PORT": 587,
+    "SMTP_USE_TLS": true,
+    "HR_EMAIL": "infotechcorp21@gmail.com",
+    "HR_PASSWORD": "cfkn yszj njaw wytw",
+    "GROQ_API_KEY": ""
+
+}
