@@ -30,8 +30,10 @@ import inspect
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-USERS_FILE = "users.json"
-CONFIG_FILE = "config.json"
+# Use absolute paths for data files to ensure they are found regardless of working directory
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+USERS_FILE = os.path.join(BASE_DIR, "users.json")
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
 def load_users():
     if os.path.exists(USERS_FILE):
