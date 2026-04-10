@@ -38,10 +38,18 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 def load_users():
     if os.path.exists(USERS_FILE):
         try:
-            with open(USERS_FILE, 'r') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
+            with open(USERS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                logging.info(f"Successfully loaded {len(data)} users from {USERS_FILE}")
+                return data
+        except json.JSONDecodeError as e:
+            logging.error(f"JSON Decode Error in {USERS_FILE}: {e}")
             return {}
+        except Exception as e:
+            logging.error(f"Unexpected error loading {USERS_FILE}: {e}")
+            return {}
+    else:
+        logging.error(f"USERS_FILE not found at: {USERS_FILE}")
     return {}
 
 def save_users(users):
@@ -920,8 +928,8 @@ def render_login():
                 <div class='login-title'>Access HR Dashboard</div>
                 <div class='login-subtitle'>Enter your company credentials to access the Recruitment System</div>
             """, unsafe_allow_html=True)
-            l_user = st.text_input("Username", placeholder="username")
-            l_pass = st.text_input("Password", type="password", placeholder="Enter your password")
+            l_user = st.text_input("Username", placeholder="username").strip()
+            l_pass = st.text_input("Password", type="password", placeholder="Enter your password").strip()
             
             st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
             submit_login = st.form_submit_button("Verify", use_container_width=True)
@@ -937,12 +945,19 @@ def render_login():
                     st.error(f"⚠️ {pass_err}")
                 else:
                     # --- Credential Matching ---
-                    if l_user in users and users[l_user] == l_pass:
+                    if l_user not in users:
+                        st.error(f"❌ User '{l_user}' not found. Please check the username.")
+                        # Debug: show if file was actually found
+                        if not os.path.exists(USERS_FILE):
+                            st.warning(f"Technical Error: Database file not found at {USERS_FILE}")
+                        elif not users:
+                            st.warning("Technical Error: Database file is empty or could not be loaded.")
+                    elif users[l_user] == l_pass:
                         st.session_state.logged_in = True
                         st.session_state.current_user = l_user
                         st.rerun()
                     else:
-                        st.error("❌ Invalid username or password. Please check your credentials and try again.")
+                        st.error("❌ Incorrect password. Please try again.")
 
 
 def logout_user():
