@@ -947,11 +947,21 @@ def render_login():
                     # --- Credential Matching ---
                     if l_user not in users:
                         st.error(f"❌ User '{l_user}' not found. Please check the username.")
-                        # Debug: show if file was actually found
-                        if not os.path.exists(USERS_FILE):
-                            st.warning(f"Technical Error: Database file not found at {USERS_FILE}")
-                        elif not users:
-                            st.warning("Technical Error: Database file is empty or could not be loaded.")
+                        
+                        # --- Deep Diagnostics ---
+                        with st.expander("🛠️ Technical Debug Info", expanded=True):
+                            st.write(f"**Target File Path:** `{os.path.abspath(USERS_FILE)}`")
+                            if os.path.exists(USERS_FILE):
+                                st.write(f"**File Size:** {os.path.getsize(USERS_FILE)} bytes")
+                                st.write(f"**Last Modified:** {datetime.fromtimestamp(os.path.getmtime(USERS_FILE))}")
+                                if users:
+                                    st.write(f"**Registered Usernames Found:** {list(users.keys())}")
+                                else:
+                                    st.warning("The user database was loaded but is EMPTY.")
+                            else:
+                                st.error(f"FATAL: The file does not exist at the path above.")
+                                st.info("If you are running on a server, ensure users.json is present in the app folder.")
+
                     elif users[l_user] == l_pass:
                         st.session_state.logged_in = True
                         st.session_state.current_user = l_user
