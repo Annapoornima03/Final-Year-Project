@@ -105,7 +105,7 @@ DEFAULT_CONFIG = {
     "TOP_N_CANDIDATES": 5,
     "EMAIL_BATCH_SIZE": 10,
     "EMAIL_DELAY": 1.0,
-    "GROQ_API_KEY": app_config.get("GROQ_API_KEY", ""),
+    "GROQ_API_KEY": os.environ.get("GROQ_API_KEY", app_config.get("GROQ_API_KEY", "")),
     "GROQ_MODEL": "llama-3.3-70b-versatile",
     "GROQ_FALLBACK_MODEL": "llama-3.1-8b-instant",
     "GROQ_MAX_RETRIES": 3,
