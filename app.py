@@ -1,5 +1,6 @@
 import os
 import re
+# Fixed Session State Logic
 import json
 import html
 import pdfplumber
@@ -28,33 +29,109 @@ from groq import Groq
 from typing import Dict, List, Optional, Tuple, Any, Union
 import inspect
 
+from dotenv import load_dotenv
+load_dotenv()  # loads GROQ_API_KEY from .env file (never pushed to git)
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Use absolute paths for data files to ensure they are found regardless of working directory
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-USERS_FILE = os.path.join(BASE_DIR, "users.json")
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+USERS_FILE = "users.json"
+CONFIG_FILE = "config.json"
 
 def load_users():
     if os.path.exists(USERS_FILE):
         try:
-            with open(USERS_FILE, 'r', encoding='utf-8') as f:
+            with open(USERS_FILE, 'r') as f:
                 data = json.load(f)
-                logging.info(f"Successfully loaded {len(data)} users from {USERS_FILE}")
-                return data
-        except json.JSONDecodeError as e:
-            logging.error(f"JSON Decode Error in {USERS_FILE}: {e}")
+            
+            upgraded = False
+            for k, v in list(data.items()):
+                if isinstance(v, str):
+                    data[k] = {
+                        "password": v,
+                        "hr_name": k,
+                        "email_connected": False
+                    }
+                    upgraded = True
+                    
+            if upgraded:
+                save_users(data)
+                
+            return data
+        except json.JSONDecodeError:
             return {}
-        except Exception as e:
-            logging.error(f"Unexpected error loading {USERS_FILE}: {e}")
-            return {}
-    else:
-        logging.error(f"USERS_FILE not found at: {USERS_FILE}")
     return {}
 
 def save_users(users):
     with open(USERS_FILE, 'w') as f:
         json.dump(users, f, indent=4)
+
+PERSISTENCE_DIR = os.path.abspath(os.path.join(os.getcwd(), "persistence_data"))
+if not os.path.exists(PERSISTENCE_DIR):
+    os.makedirs(PERSISTENCE_DIR)
+
+def get_safe_filename(username, prefix="history"):
+    """Generate a filename that's safe for Windows/Other OS even with special chars."""
+    safe_user = "".join([c if c.isalnum() else "_" for c in username])
+    return os.path.join(PERSISTENCE_DIR, f"{prefix}_{safe_user}.json")
+
+def save_persistence_data():
+    """Save critical session state data to a per-user file for persistence across refreshes."""
+    if st.session_state.get("logged_in") and st.session_state.get("current_user"):
+        username = st.session_state.current_user
+        filename = get_safe_filename(username, "state")
+        
+        data = {
+            "candidates": st.session_state.get("candidates", []),
+            "job_requisitions": st.session_state.get("job_requisitions", []),
+            "active_job_id": st.session_state.get("active_job_id"),
+            "session_activity": st.session_state.get("session_activity", []),
+            "config": st.session_state.get("config", {})
+        }
+        
+        # Handle datetime objects for JSON serialization
+        def json_serial(obj):
+            if isinstance(obj, (datetime, date)):
+                return obj.isoformat()
+            if isinstance(obj, np.integer):
+                return int(obj)
+            if isinstance(obj, np.floating):
+                return float(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            raise TypeError (f"Type {type(obj)} not serializable")
+            
+        try:
+            with open(filename, 'w') as f:
+                json.dump(data, f, indent=4, default=json_serial)
+        except Exception as e:
+            logging.error(f"Persistence save failed: {e}")
+
+def load_persistence_data(username):
+    """Load session state data from a per-user file."""
+    filename = get_safe_filename(username, "state")
+    if os.path.exists(filename):
+        try:
+            with open(filename, 'r') as f:
+                data = json.load(f)
+            
+            # Convert ISO strings back to datetimes
+            if "candidates" in data:
+                for c in data["candidates"]:
+                    if "uploaded_at" in c and isinstance(c["uploaded_at"], str):
+                        c["uploaded_at"] = datetime.fromisoformat(c["uploaded_at"])
+                    if "last_updated" in c and isinstance(c["last_updated"], str):
+                        c["last_updated"] = datetime.fromisoformat(c["last_updated"])
+            
+            if "job_requisitions" in data:
+                for j in data["job_requisitions"]:
+                    if "created_at" in j and isinstance(j["created_at"], str):
+                        j["created_at"] = datetime.fromisoformat(j["created_at"])
+            
+            return data
+        except Exception as e:
+            logging.error(f"Persistence load failed: {e}")
+            return None
+    return None
 
 def validate_username(username):
     """Validate username contains at least one special character."""
@@ -64,6 +141,62 @@ def validate_username(username):
     if not special_chars.search(username):
         return False, "Invalid Credentials"
     return True, ""
+
+def log_event(candidate="No candidates selected", resumes=0):
+    """Helper to log recruitment events with multi-session persistence."""
+    if st.session_state.get("logged_in") and st.session_state.get("current_user"):
+        username = st.session_state.current_user
+        users = load_users()
+        hr_name = users.get(username, {}).get("hr_name", username)
+        
+        # Safe access to config
+        config = st.session_state.get("config", {})
+        job_title = config.get("JOB_TITLE", "-")
+        
+        entry = {
+            "Date": datetime.now().strftime("%d-%m-%Y"),
+            "Time": datetime.now().strftime("%I:%M %p"),
+            "HR Name": hr_name.strip(),
+            "Job Title": job_title if job_title else "-",
+            "Shortlisted Candidate Name": candidate,
+            "Number of resumes uploaded": resumes,
+            "raw_timestamp": datetime.now().isoformat()
+        }
+        
+        # 1. Update session state for immediate UI update
+        if "session_activity" not in st.session_state:
+            st.session_state.session_activity = []
+        st.session_state.session_activity.append(entry)
+        
+        # 2. Update persistent history file (across logins)
+        hist_file = get_safe_filename(username, "history")
+        history = []
+        if os.path.exists(hist_file):
+            try:
+                with open(hist_file, 'r', encoding='utf-8') as f:
+                    history = json.load(f)
+            except: 
+                history = []
+        
+        # Avoid duplicate consecutive entries if UI double-triggers
+        if not history or history[-1].get("raw_timestamp") != entry["raw_timestamp"]:
+            history.append(entry)
+            
+        try:
+            with open(hist_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=4)
+        except Exception as e:
+            logging.error(f"Failed to save history: {e}")
+
+def load_full_history(username):
+    """Load the full history across all login sessions for a specific HR."""
+    hist_file = get_safe_filename(username, "history")
+    if os.path.exists(hist_file):
+        try:
+            with open(hist_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except: return []
+    return []
 
 def validate_password(password):
     """Validate password meets security requirements."""
@@ -115,7 +248,7 @@ DEFAULT_CONFIG = {
     "TOP_N_CANDIDATES": 5,
     "EMAIL_BATCH_SIZE": 10,
     "EMAIL_DELAY": 1.0,
-    "GROQ_API_KEY": os.environ.get("GROQ_API_KEY", app_config.get("GROQ_API_KEY", "")),
+    "GROQ_API_KEY": app_config.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", "")),
     "GROQ_MODEL": "llama-3.3-70b-versatile",
     "GROQ_FALLBACK_MODEL": "llama-3.1-8b-instant",
     "GROQ_MAX_RETRIES": 3,
@@ -223,7 +356,7 @@ Interview Details:
 
 Scheduled Time: {scheduled_time}
 
-Please join using the link above or arrive 5 minutes early for in-person meetings. If you need to reschedule, please let us know at least 24 hours in advance.
+If you need to reschedule, please let us know at least 24 hours in advance.
 
 Best regards,
 {hr_manager_name}
@@ -253,12 +386,13 @@ nlp = None
 ocr_reader = None
 
 class EmailManager:
-    def __init__(self, smtp_server, smtp_port, use_tls, email, password):
+    def __init__(self, smtp_server, smtp_port, use_tls, email, password, hr_name="HR Manager"):
         self.smtp_server = smtp_server
         self.smtp_port = smtp_port
         self.use_tls = use_tls
         self.email = email
         self.password = password
+        self.hr_name = hr_name
         self.connection: Optional[smtplib.SMTP] = None
         self.lock = threading.Lock()
     
@@ -297,9 +431,10 @@ class EmailManager:
             try:
                 for email_data in email_data_list:
                     try:
+                        from email.utils import formataddr
                         msg = MIMEMultipart()
                         msg['Subject'] = email_data['subject']
-                        msg['From'] = self.email
+                        msg['From'] = formataddr((self.hr_name, self.email))
                         msg['To'] = email_data['to']
                         msg.attach(MIMEText(email_data['body'], 'plain'))
                         
@@ -319,6 +454,31 @@ class EmailManager:
                 self.disconnect()
         
         return results
+
+def auto_connect_email(hr_name, username):
+    try:
+        current_config = load_config()
+        smtp_server = current_config.get("SMTP_SERVER", "smtp.gmail.com")
+        smtp_port = current_config.get("SMTP_PORT", 587)
+        use_tls = current_config.get("SMTP_USE_TLS", True)
+        hr_email = current_config.get("HR_EMAIL", "")
+        hr_password = current_config.get("HR_PASSWORD", "")
+        
+        if hr_email and hr_password:
+            mgr = EmailManager(
+                smtp_server, smtp_port, use_tls, hr_email, hr_password, hr_name
+            )
+            if mgr.connect():
+                st.session_state.email_manager = mgr
+                st.session_state.email_user = hr_email
+                users = load_users()
+                if username in users and isinstance(users[username], dict):
+                    users[username]["email_connected"] = True
+                    save_users(users)
+                return True
+    except Exception as e:
+        logging.error(f"Email auto-connect failed: {e}")
+    return False
 
 class SchedulingManager:
     def __init__(self):
@@ -514,7 +674,18 @@ class LLMResumeAnalyzer:
         # 3. Collapse multiple spaces into single spaces (but preserve newlines)
         text = re.sub(r'[ \t]{2,}', ' ', text)
         
-        return text
+        # 4. Clean contact info artifacts (common in problematic OCR/PDF encoding)
+        # Double @@ to single @
+        text = re.sub(r'@{2,}', '@', text)
+        # Fix missing dots in common domains (e.g., "name@gmai com" -> "name@gmail.com")
+        text = re.sub(r'(\S+)@([a-z0-9-]+)\s+(com|net|org|co|in|edu|gov)\b', r'\1@\2.\3', text, flags=re.I)
+        text = re.sub(r'gmai\s+com', 'gmail.com', text, flags=re.I)
+        text = re.sub(r'yaho\s+com', 'yahoo.com', text, flags=re.I)
+        
+        # 5. Normalize phone number artifacts (e.g., "0 (621)" -> "(621)")
+        text = re.sub(r'\b0\s+\((\d{3})\)\s+', r'(\1) ', text)
+        
+        return text.strip()
 
     def analyze_resume_with_llm(self, resume_text: str, jd_text: str, required_skills: List[str], 
                                salary_range: Optional[Dict[str, Any]] = None, custom_criteria: str = "") -> Dict[str, Any]:
@@ -577,6 +748,8 @@ STRICT CASE FIDELITY: Maintain the EXACT capitalization/case of all extracted fi
 - If the name is 'Y.ASHA JOSEMINE', you must return 'Y.ASHA JOSEMINE'. 
 - Do NOT normalize to 'Yasha Josemine' or 'Y.asha Josemine'.
 - Do NOT alter punctuation or spacing within names.
+
+STRICT OCR HYGIENE: The resume text may contain artifacts from PDF extraction or OCR (e.g., '@@' instead of '@', missing dots in 'gmai com', or extra spaces). You MUST intelligently correct these during extraction. For example, 'charlesbloomberg@@gmai com' should be corrected to 'charlesbloomberg@gmail.com'.
 
 {{
   "technical_score": float,
@@ -799,6 +972,43 @@ Keep it under 600 words but be specific and actionable."""
             logging.error("Error calling LLM for interview questions: %s", e)
             return FALLBACK
 
+    def validate_job_posting(self, title: str, jd: str, skills: List[str]) -> Dict[str, Any]:
+        if not self.groq_client:
+            # Fallback if API not configured: assume valid to prevent blocking
+            return {"is_valid": True, "reason": "No LLM client configured, validation skipped."}
+            
+        skills_str = ", ".join(skills) if skills else "None provided"
+        
+        prompt = f"""You are an expert HR content validator.
+Your task is to validate a Job Posting entered by an HR manager.
+You must ensure that the Job Description and Required Skills are logically related to the Job Title, and rejecting any random, meaningless text or keyboard mashing (e.g., "ajsbdkasjdb", "AABHWOGDGW", "test test test").
+
+Job Title: {title}
+Required Skills: {skills_str}
+
+Job Description:
+{jd}
+
+Evaluate the content strictly. If there is excessive gibberish, if the JD completely contradicts the Title (e.g., Title is 'Chef' but JD is about 'Building react apps'), or if it's clearly not a real job posting, mark it as invalid.
+If it is a reasonable albeit basic job posting, mark it as valid.
+
+Return ONLY a valid JSON object with EXACTLY these keys:
+{{
+  "is_valid": true or false,
+  "reason": "A brief 1-2 sentence explanation. If invalid, explain why it was rejected."
+}}"""
+        try:
+            content = self._call_groq(prompt, json_mode=True, temperature=0.1)
+            if content:
+                result = json.loads(content)
+                if "is_valid" in result and "reason" in result:
+                    return result
+            # Fail open if response is malformed
+            return {"is_valid": True, "reason": "LLM failed to validate correctly, allowed by default."}
+        except Exception as e:
+            logging.error(f"Error calling LLM for job validation: {e}")
+            return {"is_valid": True, "reason": "Internal error during validation, allowed by default."}
+
 
 def calculate_final_score(llm_analysis: Dict[str, Any], weights: Dict[str, float]) -> float:
     technical = llm_analysis.get("technical_score", 0) / 100
@@ -920,57 +1130,114 @@ def render_login():
     with col_main:
         users = load_users()
 
+        # Lockout state initialization
+        if "login_attempts" not in st.session_state:
+            st.session_state.login_attempts = 0
+        if "lockout_until" not in st.session_state:
+            st.session_state.lockout_until = None
+
+        # Check for lockout expiration or active state
+        is_locked = False
+        if st.session_state.lockout_until:
+            if datetime.now() >= st.session_state.lockout_until:
+                st.session_state.login_attempts = 0
+                st.session_state.lockout_until = None
+            else:
+                is_locked = True
+
         if logout_notice:
-            st.success(logout_notice)
+            st.toast(f"✅ {logout_notice}")
         
         with st.form("login_form"):
             st.markdown("""
                 <div class='login-title'>Access HR Dashboard</div>
-                <div class='login-subtitle'>Enter your company credentials to access the Recruitment System</div>
+                <div class='login-subtitle'>Enter your credentials to log in</div>
             """, unsafe_allow_html=True)
-            l_user = st.text_input("Username", placeholder="username").strip()
-            l_pass = st.text_input("Password", type="password", placeholder="Enter your password").strip()
+            l_name = st.text_input("HR Name", placeholder="e.g. John Doe", disabled=is_locked)
+            l_user = st.text_input("Username or Email", placeholder="Username or Email", disabled=is_locked)
+            l_pass = st.text_input("Password", type="password", placeholder="Enter your password", disabled=is_locked)
+            
+            if is_locked:
+                remaining_secs = int((st.session_state.lockout_until - datetime.now()).total_seconds())
+                if remaining_secs > 0:
+                    st.error(f"❌ Access restricted. Too many failed attempts.  \nTry again in **{remaining_secs}s**")
+                    time.sleep(1)
+                    st.rerun()
             
             st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
-            submit_login = st.form_submit_button("Verify", use_container_width=True)
+            submit_login = st.form_submit_button("Login", width="stretch", disabled=is_locked)
             
-            if submit_login:
-                # --- Input Validation ---
-                user_valid, user_err = validate_username(l_user)
-                pass_valid, pass_err = validate_password(l_pass)
-
-                if not user_valid:
-                    st.error(f"⚠️ {user_err}")
-                elif not pass_valid:
-                    st.error(f"⚠️ {pass_err}")
+            if submit_login and not is_locked:
+                # Clean inputs
+                clean_name = l_name.strip()
+                clean_user = l_user.strip()
+                clean_pass = l_pass.strip()
+                
+                if not clean_user or not clean_pass or not clean_name:
+                    st.error("⚠️ HR Name, Username, and Password are all required.")
                 else:
-                    # --- Credential Matching ---
-                    if l_user not in users:
-                        st.error(f"❌ User '{l_user}' not found. Please check the username.")
+                    # Authenticate using HR Name, Username, and Password together
+                    user_data = users.get(clean_user)
+                    is_authenticated = False
+                    
+                    if user_data:
+                        # Retrieve saved credentials from database
+                        if isinstance(user_data, dict):
+                            saved_pass = str(user_data.get("password", "")).strip()
+                            saved_name = str(user_data.get("hr_name", "")).strip()
+                        else:
+                            # Fallback for legacy format
+                            saved_pass = str(user_data).strip()
+                            saved_name = clean_user
                         
-                        # --- Deep Diagnostics ---
-                        with st.expander("🛠️ Technical Debug Info", expanded=True):
-                            st.write(f"**Target File Path:** `{os.path.abspath(USERS_FILE)}`")
-                            if os.path.exists(USERS_FILE):
-                                st.write(f"**File Size:** {os.path.getsize(USERS_FILE)} bytes")
-                                st.write(f"**Last Modified:** {datetime.fromtimestamp(os.path.getmtime(USERS_FILE))}")
-                                if users:
-                                    st.write(f"**Registered Usernames Found:** {list(users.keys())}")
-                                else:
-                                    st.warning("The user database was loaded but is EMPTY.")
-                            else:
-                                st.error(f"FATAL: The file does not exist at the path above.")
-                                st.info("If you are running on a server, ensure users.json is present in the app folder.")
-
-                    elif users[l_user] == l_pass:
+                        # Verify all three fields match exactly as they appear in the records
+                        if saved_pass == clean_pass and saved_name == clean_name:
+                            is_authenticated = True
+                    
+                    if is_authenticated:
+                        st.session_state.login_attempts = 0
                         st.session_state.logged_in = True
-                        st.session_state.current_user = l_user
+                        st.session_state.current_user = clean_user
+                        st.query_params["logged_in"] = "true"
+                        st.query_params["user"] = clean_user
+                        
+                        # Use the exact name from database for email connection
+                        db_name = user_data.get("hr_name", clean_name) if isinstance(user_data, dict) else clean_name
+                        auto_connect_email(db_name, clean_user)
+                        
+                        # FRESH START ON LOGIN: Clear previous recruitment data and session state
+                        # This ensures the user starts with the "Create New Job Posting" state
+                        state_file = get_safe_filename(clean_user, "state")
+                        if os.path.exists(state_file):
+                            try:
+                                os.remove(state_file)
+                            except:
+                                pass
+                        
+                        # Reset session variables to ensure no old data is shown
+                        st.session_state.candidates = []
+                        st.session_state.job_requisitions = []
+                        st.session_state.active_job_id = None
+                        st.session_state.session_activity = []
+                        
                         st.rerun()
                     else:
-                        st.error("❌ Incorrect password. Please try again.")
+                        # Increment failed attempts and trigger lockout if more than 3
+                        st.session_state.login_attempts += 1
+                        
+                        if st.session_state.login_attempts > 3:
+                            st.session_state.lockout_until = datetime.now() + timedelta(seconds=30)
+                            st.error("❌ Too many failed attempts. Login functionality disabled for 30 seconds.")
+                            time.sleep(2)
+                            st.rerun()
+                        else:
+                            # Generic error message to handle mismatched or partial credentials
+                            st.error(f"❌ Invalid Credentials. Please ensure HR Name, Username, and Password are correct. (Attempts: {st.session_state.login_attempts}/3)")
 
 
 def logout_user():
+    current_user = st.session_state.get("current_user")
+    
     email_manager = st.session_state.get("email_manager")
     if email_manager:
         try:
@@ -978,11 +1245,25 @@ def logout_user():
         except Exception as exc:
             logging.warning(f"Error while disconnecting email manager during logout: {exc}")
 
+    # 1. DELETE temporary session state on explicit logout
+    # This clears candidates/active jobs so the next session starts fresh.
+    if current_user:
+        filename = get_safe_filename(current_user, "state")
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except:
+                pass
+    
+    # NOTE: history_{user}.json FILES are NOT deleted, preserving Recent Activity.
+
     for key in list(st.session_state.keys()):
         del st.session_state[key]
 
     st.session_state.logged_in = False
-    st.session_state.logout_notice = "You have been logged out successfully."
+    st.query_params.clear()
+    # Using toast-friendly shorter message
+    st.session_state.logout_notice = "Logout successful!"
     st.rerun()
 
 
@@ -1014,14 +1295,13 @@ def render_logout_control():
                     <div>
                         <div class="logout-user-name">{safe_current_user}</div>
                     </div>
-                    <div class="logout-status-pill">Secure</div>
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        if st.button("Log Out", key="logout_button", use_container_width=True):
+        if st.button("Log Out", key="logout_button", width="stretch"):
             if hasattr(st, "dialog"):
                 st.session_state.show_logout_confirm = True
             else:
@@ -1029,21 +1309,15 @@ def render_logout_control():
             st.rerun()
 
         if st.session_state.get("show_logout_inline_confirm", False):
-            st.markdown(
-                """
-                <div class="logout-confirm-box">
-                    Are you sure you want to logout?
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            col_cancel, col_confirm = st.columns(2)
-            if col_cancel.button("Cancel", key="logout_cancel_inline", use_container_width=True):
-                st.session_state.show_logout_inline_confirm = False
-                st.rerun()
-            if col_confirm.button("Logout", key="logout_confirm_inline", type="primary", use_container_width=True):
-                st.session_state.show_logout_inline_confirm = False
-                logout_user()
+            with st.expander("⚠️ Confirm Logout", expanded=True):
+                st.write("Are you sure you want to log out?")
+                col_cancel, col_confirm = st.columns(2)
+                if col_cancel.button("Cancel", key="logout_cancel_inline", width="stretch"):
+                    st.session_state.show_logout_inline_confirm = False
+                    st.rerun()
+                if col_confirm.button("Logout", key="logout_confirm_inline", type="primary", width="stretch"):
+                    st.session_state.show_logout_inline_confirm = False
+                    logout_user()
 
 
 def main():
@@ -1211,14 +1485,48 @@ def main():
     
     st.markdown('<h1 class="main-header"> Enterprise AI Recruitment System</h1>', unsafe_allow_html=True)
     
+    # Initialize essential session state immediately
+    if "email_user" not in st.session_state:
+        st.session_state.email_user = "Not Connected"
+    
+    # Initialize configuration immediately
+    if "config" not in st.session_state:
+        st.session_state.config = DEFAULT_CONFIG.copy()
+
     if "logged_in" not in st.session_state:
-        st.session_state.logged_in = False
+        # PERSISTENCE: Check query params to stay logged in after refresh
+        try:
+            params = st.query_params
+            if params.get("logged_in") == "true" and "user" in params:
+                user_id = params["user"]
+                users = load_users()
+                if user_id in users:
+                    st.session_state.logged_in = True
+                    st.session_state.current_user = user_id
+                else:
+                    st.session_state.logged_in = False
+            else:
+                st.session_state.logged_in = False
+        except:
+            st.session_state.logged_in = False
         
     if not st.session_state.logged_in:
         render_login()
         return
 
-    # Initialize session state
+    # PERSISTENCE LOAD (Only once per session initialization)
+    if "persistence_loaded" not in st.session_state:
+        p_data = load_persistence_data(st.session_state.current_user)
+        if p_data:
+            st.session_state.candidates = p_data.get("candidates", [])
+            st.session_state.job_requisitions = p_data.get("job_requisitions", [])
+            st.session_state.active_job_id = p_data.get("active_job_id")
+            st.session_state.session_activity = p_data.get("session_activity", [])
+            if "config" in p_data:
+                st.session_state.config = p_data["config"]
+        st.session_state.persistence_loaded = True
+
+    # Initialize session state (if not already loaded from persistence)
     if "config" not in st.session_state:
         st.session_state.config = DEFAULT_CONFIG.copy()
     else:
@@ -1242,6 +1550,14 @@ def main():
     if "email_manager" not in st.session_state:
         st.session_state.email_manager = None
     
+    if st.session_state.email_manager is None and st.session_state.logged_in:
+        # Re-establish email connection for persistent sessions
+        curr_user = st.session_state.current_user
+        users_check = load_users()
+        if curr_user in users_check:
+            hr_name_check = users_check[curr_user].get("hr_name", curr_user)
+            auto_connect_email(hr_name_check, curr_user)
+    
     if "scheduling_manager" not in st.session_state:
         st.session_state.scheduling_manager = SchedulingManager()
     
@@ -1249,8 +1565,19 @@ def main():
     if 'date_time' not in inspect.signature(st.session_state.scheduling_manager.schedule_interview).parameters:
         st.session_state.scheduling_manager = SchedulingManager()
     
-    if "job_requisitions" not in st.session_state:
-        st.session_state.job_requisitions = []
+    if "job_requisitions" not in st.session_state or not st.session_state.job_requisitions:
+        # Default state: Always start with Create New Job Posting prompt
+        st.session_state.job_requisitions = [
+            {
+                "id": 1,
+                "title": "New Position",
+                "department": "Engineering",
+                "created_at": datetime.now(),
+                "status": "Draft",
+                "candidates": []
+            }
+        ]
+        st.session_state.active_job_id = 1
     
     if "active_job_id" not in st.session_state:
         st.session_state.active_job_id = None
@@ -1261,7 +1588,6 @@ def main():
     # Sidebar Configuration
     with st.sidebar:
         render_logout_control()
-        
         
         st.header("  System Configuration")
         
@@ -1376,15 +1702,30 @@ def main():
             if st.button(" Save Job Requirements", width="stretch"):
                 if max_experience <= min_experience:
                     st.error("Max Experience must be greater than Min Experience.")
+                elif len(jd_text.strip()) < 10:
+                    st.error("Please provide meaningful details")
+                elif not required_skills:
+                    st.error("Please provide at least one required skill.")
                 elif active_job:
-                    active_job.update({
-                        "jd_text": jd_text,
-                        "required_skills": required_skills,
-                        "min_experience": min_experience,
-                        "max_experience": max_experience,
-                        "custom_criteria": custom_criteria
-                    })
-                    st.success("Requirements saved to active job!")
+                    with st.spinner("Validating content for relevance..."):
+                        validation_result = st.session_state.analyzer.validate_job_posting(
+                            job_title, jd_text, required_skills
+                        )
+                    
+                    if not validation_result.get("is_valid", True):
+                        st.error("⚠️ Validation Failed: The job posting includes unclear or meaningless content, so it cannot be processed.")
+                    else:
+                        if validation_result.get("reason") and "skipped" not in validation_result.get("reason", "").lower() and "allowed by default" not in validation_result.get("reason", "").lower():
+                            st.caption(f"Validation Note: {validation_result.get('reason')}")
+                        
+                        active_job.update({
+                            "jd_text": jd_text,
+                            "required_skills": required_skills,
+                            "min_experience": min_experience,
+                            "max_experience": max_experience,
+                            "custom_criteria": custom_criteria
+                        })
+                        st.success("Requirements validated and saved to active job!")
                 else:
                     st.warning("No active job selected to save requirements.")
         
@@ -1433,33 +1774,21 @@ def main():
                     st.rerun()
         
         with st.expander(" Email & Notifications", expanded=False):
+            users = load_users()
+            current_user_data = users.get(st.session_state.current_user, {})
+            hr_name = current_user_data.get("hr_name", "Hiring Manager")
+            
             company_name = st.text_input("Company Name", value="TechCorp")
-            hr_manager_name = st.text_input("HR Manager Name", value="Hiring Manager")
             
             st.session_state.config["COMPANY_NAME"] = company_name
-            st.session_state.config["HR_MANAGER_NAME"] = hr_manager_name
+            st.session_state.config["HR_MANAGER_NAME"] = hr_name
+            st.info(f"HR Name : **{hr_name}**")
             
-            st.markdown("**SMTP Settings:**")
-            st.info("SMTP configuration is managed securely by the administrator.")
-            
-            if st.button(" Connect Email", width="stretch"):
-                current_config = load_config()
-                smtp_server = current_config.get("SMTP_SERVER", "smtp.gmail.com")
-                smtp_port = current_config.get("SMTP_PORT", 587)
-                use_tls = current_config.get("SMTP_USE_TLS", True)
-                hr_email = current_config.get("HR_EMAIL", "")
-                hr_password = current_config.get("HR_PASSWORD", "")
-                
-                if hr_email and hr_password:
-                    mgr = EmailManager(smtp_server, smtp_port, use_tls, hr_email, hr_password)
-                    if mgr.connect():
-                        st.session_state.email_manager = mgr
-                        mgr.disconnect()
-                        st.success(" Email connected!")
-                    else:
-                        st.error(" Connection failed")
-                else:
-                    st.error(" SMTP credentials missing from configuration.")
+            if current_user_data.get("email_connected"):
+                if st.button("Email Connected Successfully"):
+                    st.info("Your email account is authenticated and ready for bulk recruitment.")
+            else:
+                st.warning("⚠️ SMTP settings are missing from the configuration (.env/config.json).")
         
         with st.expander(" Customization", expanded=False):
             interview_rounds = st.multiselect("Interview Rounds",
@@ -1475,15 +1804,20 @@ def main():
             
             top_n = st.number_input("Top N to Review", 1, 50, 10)
             st.session_state.config["TOP_N_CANDIDATES"] = top_n
+
+    # Initialize session-based activity tracking
+    if "session_activity" not in st.session_state:
+        st.session_state.session_activity = []
     
-    # Main Tabs
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    # Main Tabs - Added Recent Activity as Tab 7
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         " Resume Upload",
         " Candidate Pipeline", 
         " Analytics & Reports",
         " Communication Hub",
         " Interview Scheduler",
-        " Workflow Automation"
+        " Workflow Automation",
+        " Recent Activity"
     ])
     
     with tab1:
@@ -1585,8 +1919,14 @@ def main():
                     status.text(f" Analysis complete!")
                     
                     # Show summary
-                    shortlisted = len([c for c in candidates if c["status"] == "Shortlisted"])
+                    shortlisted_list = [c for c in candidates if c["status"] == "Shortlisted"]
+                    shortlisted = len(shortlisted_list)
                     rejected = len([c for c in candidates if c["status"] == "Rejected"])
+                    
+                    if shortlisted_list:
+                        # Log candidates that were automatically shortlisted during analysis
+                        names = [c["llm_analysis"].get("name", "Unknown") for c in shortlisted_list]
+                        log_event(candidate=", ".join(names), resumes=total)
                     
                     col_s1, col_s2, col_s3 = st.columns(3)
                     col_s1.success(f" Shortlisted: {shortlisted}")
@@ -1713,8 +2053,19 @@ def main():
                     ["Shortlisted", "Interviewing", "Offered", "Rejected"])
                 
                 if col_bulk4.button(" Update Status", width="stretch"):
+                    shortlisted_batch = []
                     for idx in selected_indices:
+                        cand_name = filtered_candidates[idx].get("llm_analysis", {}).get("name", "Unknown")
+                        if new_status == "Shortlisted" and filtered_candidates[idx].get("status") != "Shortlisted":
+                            # Collecting names for potential single-action batch log
+                            shortlisted_batch.append(cand_name)
                         filtered_candidates[idx]["status"] = new_status
+                    
+                    if shortlisted_batch:
+                        # Log the actual batch size for context
+                        batch_info = len(st.session_state.get("candidates", []))
+                        log_event(candidate=", ".join(shortlisted_batch), resumes=batch_info)
+                    
                     st.success(f"Updated {len(selected_indices)} candidates to {new_status}")
                     st.rerun()
             
@@ -1903,6 +2254,11 @@ def main():
                             key=f"status_{selected_idx}")
                         
                         if col_act2.button(" Update", width="stretch"):
+                            cand_name = candidate.get("llm_analysis", {}).get("name", "Unknown")
+                            if new_status == "Shortlisted" and candidate.get("status") != "Shortlisted":
+                                # Track historical shortlist activity with batch context
+                                batch_info = len(st.session_state.get("candidates", []))
+                                log_event(candidate=cand_name, resumes=batch_info)
                             candidate["status"] = new_status
                             candidate["last_updated"] = datetime.now()
                             st.success(f"Status updated to {new_status}")
@@ -2011,7 +2367,13 @@ def main():
                 email_template = st.selectbox("Select Template",
                     list(st.session_state.config["EMAIL_TEMPLATES"].keys()),
                     format_func=lambda x: x.capitalize())
-
+                with st.expander(" Connected Email Account", expanded=True):
+                    st.markdown(f"**User:** {st.session_state.current_user}")
+                    # Interactive email display for connection confirmation
+                    email_display = st.session_state.get("email_user", "Not Connected")
+                    if st.button(f"📧 {email_display}", key="email_conn_check", help="Click to verify connection"):
+                        st.toast("✅ Email connected successfully!")
+                    st.success(f" Status: Connected")
                 st.markdown("**Bulk Selection by Category:**")
                 col_b1, col_b2, col_b3, col_b4 = st.columns(4)
                 
@@ -2077,15 +2439,28 @@ def main():
                                 job_title=st.session_state.config.get("JOB_TITLE", "Position"),
                                 company_name=st.session_state.config.get("COMPANY_NAME", "Company")
                             )
-                            body = template["body"].format(
+                            template_body = template["body"]
+                            
+                            # Check if candidate is actually shortlisted
+                            candidate_obj = next((c for c in st.session_state.candidates if c.get("llm_analysis", {}).get("email") == email), None)
+                            is_shortlisted = candidate_obj and candidate_obj.get("status") == "Shortlisted"
+                            
+                            if is_shortlisted and (email_template == "selected" or email_template == "interview"):
+                                # Replace the interview details section with the requested message
+                                detail_pattern = r"Interview Details:.*?(?=(?:Please confirm|If you need|Scheduled Time|Best regards))"
+                                if re.search(detail_pattern, template_body, re.DOTALL):
+                                    template_body = re.sub(detail_pattern, "Interview details will be provided later.\n\n", template_body, flags=re.DOTALL)
+                                    template_body = template_body.replace("Scheduled Time: {scheduled_time}", "")
+                            
+                            body = template_body.format(
                                 candidate_name=name,
                                 job_title=st.session_state.config.get("JOB_TITLE", "Position"),
                                 company_name=st.session_state.config.get("COMPANY_NAME", "Company"),
                                 hr_manager_name=st.session_state.config.get("HR_MANAGER_NAME", "HR"),
                                 interview_round="Initial",
-                                interview_mode="Video",
+                                interview_mode="Video Call",
                                 duration="45",
-                                meeting_details="TBD",
+                                meeting_details="Note: The access link will be provided an hour in advance. We request you to join 5 minutes before your scheduled slot.",
                                 benefits="Standard",
                                 salary_offer="TBD",
                                 scheduled_time="TBD",
@@ -2237,7 +2612,7 @@ def main():
                 border-color: rgba(96, 165, 250, 0.6) !important;
                 box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.45), 0 0 0 4px rgba(37, 99, 235, 0.18) !important;
             }
-            .st-key-schedule_invitation_section div[data-testid="stFormSubmitButton"] button {
+            .st-key-schedule_invitation_section div[data-testid="stButton"] button {
                 background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 100%) !important;
                 background-color: #0F172A !important;
                 color: #F8FAFC !important;
@@ -2245,11 +2620,12 @@ def main():
                 border: 1px solid rgba(96, 165, 250, 0.28) !important;
                 box-shadow: 0 2px 8px rgba(15, 23, 42, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
                 transition: none !important;
+                width: 100% !important;
             }
-            .st-key-schedule_invitation_section div[data-testid="stFormSubmitButton"] button:hover,
-            .st-key-schedule_invitation_section div[data-testid="stFormSubmitButton"] button:focus,
-            .st-key-schedule_invitation_section div[data-testid="stFormSubmitButton"] button:focus-visible,
-            .st-key-schedule_invitation_section div[data-testid="stFormSubmitButton"] button:active {
+            .st-key-schedule_invitation_section div[data-testid="stButton"] button:hover,
+            .st-key-schedule_invitation_section div[data-testid="stButton"] button:focus,
+            .st-key-schedule_invitation_section div[data-testid="stButton"] button:focus-visible,
+            .st-key-schedule_invitation_section div[data-testid="stButton"] button:active {
                 background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 100%) !important;
                 background-color: #0F172A !important;
                 color: #F8FAFC !important;
@@ -2313,105 +2689,117 @@ def main():
                 else:
                     st.warning("  No eligible candidates available to schedule. Please update candidate statuses to Shortlisted or Interviewing first.")
             else:
-                with st.form("interview_schedule_form"):
-                    col_sch1, col_sch2 = st.columns(2)
-                    
-                    # Candidate selection
-                    candidate_options = [f"{c['llm_analysis'].get('name', 'N/A')} ({c['llm_analysis'].get('email', 'N/A')})" 
-                                       for c in schedule_candidates]
-                    selected_cand_str = col_sch1.selectbox("Select Candidate*", options=candidate_options)
-                    
-                    # Find the selected candidate object
-                    selected_candidate_idx = candidate_options.index(selected_cand_str)
-                    selected_candidate = schedule_candidates[selected_candidate_idx]
-                    
-                    interview_round = col_sch2.selectbox("Interview Round*", 
-                        st.session_state.config.get("INTERVIEW_ROUNDS", ["Technical Screen", "Hiring Manager", "HR Round"]))
-                    
-                    col_sch3, col_sch4 = st.columns(2)
-                    interview_date = col_sch3.date_input("Interview Date*", value=date.today() + timedelta(days=1))
-                    interview_time = col_sch4.time_input("Interview Time*", value=datetime.now().time())
-                    
-                    col_sch5, col_sch6 = st.columns(2)
-                    duration = col_sch5.number_input("Duration (minutes)*", min_value=15, max_value=180, value=45, step=15)
-                    interview_mode = col_sch6.selectbox("Interview Mode*", ["Video Call", "Phone Call", "In-Person"])
-                    
-                    col_sch7, col_sch8 = st.columns(2)
-                    interviewer = col_sch7.text_input("Interviewer Name*", value=st.session_state.config.get("HR_MANAGER_NAME", "Hiring Manager"))
-                    meeting_link = col_sch8.text_input("Meeting Link / Location", placeholder="https://zoom.us/j/...")
-                    
-                    submit_btn = st.form_submit_button(" Schedule & Send Invitation", width="stretch")
-                    
-                    if submit_btn:
-                        # Combine date and time
-                        dt = datetime.combine(interview_date, interview_time)
+                # Using reactive containers instead of a form to allow instant UI updates
+                col_sch1, col_sch2 = st.columns(2)
+                
+                # Candidate selection
+                candidate_options = [f"{c['llm_analysis'].get('name', 'N/A')} ({c['llm_analysis'].get('email', 'N/A')})" 
+                                   for c in schedule_candidates]
+                selected_cand_str = col_sch1.selectbox("Select Candidate*", options=candidate_options)
+                
+                # Find the selected candidate object
+                selected_candidate_idx = candidate_options.index(selected_cand_str)
+                selected_candidate = schedule_candidates[selected_candidate_idx]
+                
+                interview_round = col_sch2.selectbox("Interview Round*", 
+                    st.session_state.config.get("INTERVIEW_ROUNDS", ["Technical Screen", "Hiring Manager", "HR Round"]))
+                
+                col_sch3, col_sch4 = st.columns(2)
+                interview_date = col_sch3.date_input("Interview Date*", value=date.today() + timedelta(days=1))
+                interview_time = col_sch4.time_input("Interview Time*", value=datetime.now().time())
+                
+                col_sch5, col_sch6 = st.columns(2)
+                duration = col_sch5.number_input("Duration (minutes)*", min_value=15, max_value=180, value=45, step=15)
+                interview_mode = col_sch6.selectbox("Interview Mode*", ["Video Call", "In-Person"])
+                
+                col_sch7, col_sch8 = st.columns(2)
+                interviewer = col_sch7.text_input("Interviewer Name*", value=st.session_state.config.get("HR_MANAGER_NAME", "Hiring Manager"))
+                
+                if interview_mode == "Video Call":
+                    # Display Online Mode and define meeting_link internally
+                    col_sch8.selectbox("Mode", ["Online Mode"], disabled=True)
+                    meeting_link = "Online Mode"
+                else:
+                    # Inline Location options
+                    meeting_link = col_sch8.selectbox("Meeting/Location*", ["Select a location...", "Chennai", "Bangalore"])
+                
+                submit_btn = st.button(" Schedule & Send Invitation", type="primary", use_container_width=True)
+                
+                if submit_btn:
+                    if interview_mode == "In-Person" and meeting_link == "Select a location...":
+                        st.error("Please select a location (Chennai or Bangalore) before proceeding with the schedule.")
+                        st.stop()
                         
-                        # Schedule in manager
-                        interview_id = st.session_state.scheduling_manager.schedule_interview(
-                            candidate_name=selected_candidate['llm_analysis'].get('name', 'Candidate'),
-                            candidate_email=selected_candidate['llm_analysis'].get('email', ''),
-                            date_time=dt,
-                            duration=duration,
-                            mode=interview_mode,
-                            interviewer=interviewer,
-                            meeting_link=meeting_link,
-                            interview_round=interview_round
-                        )
+                    # Combine date and time
+                    dt = datetime.combine(interview_date, interview_time)
                         
-                        if interview_id:
-                            st.success(f" Interview scheduled for {selected_candidate['llm_analysis'].get('name')}!")
-                            
-                            # Attempt to send email if manager is connected
-                            if st.session_state.email_manager:
-                                with st.spinner(" Sending invitation email..."):
-                                    try:
-                                        template = st.session_state.config["EMAIL_TEMPLATES"].get("interview")
-                                        if not template:
-                                            st.error("Interview email template missing from configuration.")
-                                            st.stop()
-                                        subject = template["subject"].format(
-                                            job_title=st.session_state.config.get("JOB_TITLE", "the position"),
-                                            company_name=st.session_state.config.get("COMPANY_NAME", "our company")
-                                        )
-                                        body = template["body"].format(
-                                            candidate_name=selected_candidate['llm_analysis'].get('name', 'Candidate'),
-                                            job_title=st.session_state.config.get("JOB_TITLE", "the position"),
-                                            interview_round=interview_round,
-                                            interview_mode=interview_mode,
-                                            duration=duration,
-                                            meeting_details=f"Meeting Link/Location: {meeting_link}" if meeting_link else "Details will be shared shortly",
-                                            scheduled_time=dt.strftime('%A, %B %d, %Y at %I:%M %p'),
-                                            hr_manager_name=st.session_state.config.get("HR_MANAGER_NAME", "HR Team"),
-                                            company_name=st.session_state.config.get("COMPANY_NAME", "our company")
-                                        )
-                                        
-                                        # Time is now in the template body
-                                        pass
-                                        
-                                        email_data = {
-                                            "to": selected_candidate['llm_analysis'].get('email', ''),
-                                            "subject": subject,
-                                            "body": body
-                                        }
-                                        
-                                        result = st.session_state.email_manager.send_batch_emails([email_data])
-                                        
-                                        if result["sent"] > 0:
-                                            st.success("Invitation email sent successfully!")
-                                            # Update candidate status
-                                            selected_candidate["status"] = "Interviewing"
-                                            time.sleep(1) # Small delay to see message
-                                            st.rerun()
-                                        else:
-                                            st.error(f"Failed to send email: {', '.join(result['errors'])}")
-                                            # Don't rerun on error so user can see what happened
-                                    except Exception as e:
-                                        st.error(f"Interview scheduled, but failed to send email: {str(e)}")
-                        else:
-                            st.warning("Email manager not connected. Please connect your email in the sidebar first.")
-                            # Still update status as the interview IS scheduled in the internal manager
-                            selected_candidate["status"] = "Interviewing"
-                            st.rerun()
+                    # Schedule in manager
+                    interview_id = st.session_state.scheduling_manager.schedule_interview(
+                        candidate_name=selected_candidate['llm_analysis'].get('name', 'Candidate'),
+                        candidate_email=selected_candidate['llm_analysis'].get('email', ''),
+                        date_time=dt,
+                        duration=duration,
+                        mode=interview_mode,
+                        interviewer=interviewer,
+                        meeting_link=meeting_link,
+                        interview_round=interview_round
+                    )
+                    
+                    if interview_id:
+                        st.success(f" Interview scheduled for {selected_candidate['llm_analysis'].get('name')}!")
+                        
+                        # Attempt to send email if manager is connected
+                        if st.session_state.email_manager:
+                            with st.spinner(" Sending invitation email..."):
+                                try:
+                                    template = st.session_state.config["EMAIL_TEMPLATES"].get("interview")
+                                    if not template:
+                                        st.error("Interview email template missing from configuration.")
+                                        st.stop()
+                                    subject = template["subject"].format(
+                                        job_title=st.session_state.config.get("JOB_TITLE", "the position"),
+                                        company_name=st.session_state.config.get("COMPANY_NAME", "our company")
+                                    )
+                                    body = template["body"].format(
+                                        candidate_name=selected_candidate['llm_analysis'].get('name', 'Candidate'),
+                                        job_title=st.session_state.config.get("JOB_TITLE", "the position"),
+                                        interview_round=interview_round,
+                                        interview_mode=interview_mode,
+                                        duration=duration,
+                                        meeting_details=(
+                                            "Note: The link will be available 1 hour before the scheduled time. Please join 5 minutes before your scheduled time." if interview_mode == "Video Call" else
+                                            "Location: Infotech Corp, Plot No. 12, 3rd Floor, Tidel Park, Rajiv Gandhi Salai, Taramani, Chennai, Tamil Nadu 600113.\nNote: Please arrive at the company location at the exact scheduled time." if (interview_mode == "In-Person" and meeting_link == "Chennai") else
+                                            "Location: Infotech Corp, Plot No. 45, 2nd Floor, Embassy Tech Village, Outer Ring Road, Devarabeesanahalli, Bangalore, Karnataka 560103.\nNote: Please arrive at the company location at the exact scheduled time." if (interview_mode == "In-Person" and meeting_link == "Bangalore") else
+                                            f"Meeting Link/Location: {meeting_link}" if meeting_link else "Details will be shared shortly"
+                                        ),
+                                        scheduled_time=dt.strftime('%A, %B %d, %Y at %I:%M %p'),
+                                        hr_manager_name=st.session_state.config.get("HR_MANAGER_NAME", "HR Team"),
+                                        company_name=st.session_state.config.get("COMPANY_NAME", "our company")
+                                    )
+                                    
+                                    email_data = {
+                                        "to": selected_candidate['llm_analysis'].get('email', ''),
+                                        "subject": subject,
+                                        "body": body
+                                    }
+                                    
+                                    result = st.session_state.email_manager.send_batch_emails([email_data])
+                                    
+                                    if result["sent"] > 0:
+                                        st.success("Invitation email sent successfully!")
+                                        # Update candidate status
+                                        selected_candidate["status"] = "Interviewing"
+                                        time.sleep(1) # Small delay to see message
+                                        st.rerun()
+                                    else:
+                                        st.error(f"Failed to send email: {', '.join(result['errors'])}")
+                                except Exception as e:
+                                    st.error(f"Interview scheduled, but failed to send email: {str(e)}")
+                    else:
+                        st.warning("Email manager not connected. Please connect your email in the sidebar first.")
+                        # Still update status as the interview IS scheduled in the internal manager
+                        selected_candidate["status"] = "Interviewing"
+                        st.rerun()
 
     with tab6:
         st.header("  Workflow Automation & Settings")
@@ -2528,8 +2916,11 @@ def main():
                     
                     progress_bar.progress(0.8)
 
-                    # 3. Top Candidate Interview Invite
                     if selected:
+                        # LOG AUTOMATION SHORTLISTS: Ensure candidates found via automated workflow are persisted in history
+                        shortlisted_names = [c['llm_analysis'].get('name', 'Candidate') for c in selected]
+                        log_event(candidate=", ".join(shortlisted_names), resumes=len(new_candidates))
+                        
                         top_cand = selected[0] # The one with highest score among new ones
                         status_text.markdown(f"###  Phase 3: Interview Invite for Top Candidate - **{top_cand['llm_analysis'].get('name')}**")
                         status_text.text(f"Scheduling and sending interview invite to {top_cand['llm_analysis'].get('email')}...")
@@ -2560,7 +2951,7 @@ def main():
                                 interview_round="Technical Screen",
                                 interview_mode="Video Call",
                                 duration=45,
-                                meeting_details="Meeting Link: https://vcodez.zoom.us/auto-link",
+                                meeting_details="Note: The link will be available 1 hour before the scheduled time. Please join 5 minutes before your scheduled time.",
                                 scheduled_time=dt.strftime('%A, %B %d, %Y at %I:%M %p'),
                                 hr_manager_name=st.session_state.config.get("HR_MANAGER_NAME", "HR Team"),
                                 company_name=st.session_state.config.get("COMPANY_NAME", "our company")
@@ -2603,8 +2994,47 @@ def main():
             st.success("All data has been reset!")
             st.rerun()
 
+    with tab7:
+        st.header("  Recent Activity (Multi-Session Log)")
+        st.caption(f"Viewing session history for: **{st.session_state.current_user}**")
+        
+        # Load full history from persistent file
+        full_history = load_full_history(st.session_state.current_user)
+        
+        # Define activities to exclude to ensure only shortlisted candidates are shown
+        excluded = ["Session Started", "No candidates selected", "No candidates have been shortlisted yet.", "-", ""]
+        
+        # Filter for shortlisted candidate activities reliably
+        shortlist_history = [
+            activity for activity in full_history 
+            if activity.get("Shortlisted Candidate Name") and str(activity.get("Shortlisted Candidate Name")).strip() not in excluded
+        ]
+        
+        if not shortlist_history:
+            st.info("No candidates selected.")
+        else:
+            # Sort by raw_timestamp descending to show newest activities first
+            shortlist_history.sort(key=lambda x: x.get("raw_timestamp", ""), reverse=True)
+            
+            # Prepare data for display in a formal table
+            df_final = pd.DataFrame(shortlist_history)
+            
+            # Ensure proper schema and column order for display
+            display_cols = ["Date", "Time", "HR Name", "Job Title", "Shortlisted Candidate Name", "Number of resumes uploaded"]
+            for col in display_cols:
+                if col not in df_final.columns:
+                    df_final[col] = "-"
+            
+            # Clean up number strings and handle missing values
+            df_final["Number of resumes uploaded"] = df_final["Number of resumes uploaded"].fillna(0).astype(str).replace("-", "0").replace("nan", "0")
+            
+            # Map values to ensure clean comma-separated format is visible
+            st.table(df_final[display_cols])
+
     if st.session_state.get("show_logout_confirm", False) and hasattr(st, "dialog"):
         render_logout_dialog()
 
 if __name__ == "__main__":
     main()
+    # SAVE PERSISTENCE on every run
+    save_persistence_data()

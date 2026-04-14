@@ -1,7 +1,27 @@
 {
-    "H@ritha21": "Haritha1",
-    "Punitha@21": "Punitha1",
-    "Poorni@03": "Poorni03",
-    "Asha@24": "Asha2454",
-    "Aarthi@21": "Aarthi21"
+    "H@ritha21": {
+        "password": "Haritha1",
+        "hr_name": "Haritha M",
+        "email_connected": true
+    },
+    "Punitha@21": {
+        "password": "Punitha1",
+        "hr_name": "Punithavalli S",
+        "email_connected": true
+    },
+    "Poorni@03": {
+        "password": "Poorni03",
+        "hr_name": "ANNAPOORNIMA P",
+        "email_connected": true
+    },
+    "Asha@21": {
+        "password": "Asha2454",
+        "hr_name": "Asha Josemine Y",
+        "email_connected": true
+    },
+    "Aarthi@21": {
+        "password": "Aarthi21",
+        "hr_name": "AARTHI S    ",
+        "email_connected": true
+    }
 }
