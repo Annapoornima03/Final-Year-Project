@@ -1,0 +1,78 @@
+{
+    "candidates": [],
+    "job_requisitions": [
+        {
+            "id": 1,
+            "title": "New Position",
+            "department": "Engineering",
+            "created_at": "2026-04-16T13:52:32.027940",
+            "status": "Draft",
+            "candidates": []
+        }
+    ],
+    "active_job_id": 1,
+    "session_activity": [],
+    "config": {
+        "WEIGHTS": {
+            "technical_skills": 0.38888888888888884,
+            "experience": 0.2777777777777778,
+            "education": 0.16666666666666666,
+            "jd_match": 0.16666666666666666,
+            "growth_potential": 0.1
+        },
+        "SCORE_THRESHOLD": 0.7,
+        "TOP_N_CANDIDATES": 10,
+        "EMAIL_BATCH_SIZE": 10,
+        "EMAIL_DELAY": 1.0,
+        "GROQ_API_KEY": "",
+        "GROQ_MODEL": "llama-3.3-70b-versatile",
+        "GROQ_FALLBACK_MODEL": "llama-3.1-8b-instant",
+        "GROQ_MAX_RETRIES": 3,
+        "HR_MANAGER_NAME": "AARTHI S    ",
+        "COMPANY_NAME": "TechCorp",
+        "NOTICE_PERIOD_DAYS": 30,
+        "REQUIRED_CLEARANCES": [],
+        "DIVERSITY_HIRING": false,
+        "AUTO_REJECT_THRESHOLD": 0.3,
+        "INTERVIEW_ROUNDS": [
+            "Technical Screen",
+            "Hiring Manager",
+            "HR Round"
+        ],
+        "TAGS": [
+            "Urgent",
+            "Remote OK",
+            "Leadership",
+            "Referral",
+            "Alumni"
+        ],
+        "SMTP_SERVER": "smtp.gmail.com",
+        "SMTP_PORT": 587,
+        "SMTP_USE_TLS": true,
+        "HR_EMAIL": "infotechcorp21@gmail.com",
+        "HR_PASSWORD": "cfkn yszj njaw wytw",
+        "EMAIL_TEMPLATES": {
+            "selected": {
+                "subject": "Interview Invitation - {job_title} Position at {company_name}",
+                "body": "Dear {candidate_name},\n\nThank you for your interest in the {job_title} position at {company_name}. After carefully reviewing your application, we are pleased to inform you that your profile aligns well with our requirements.\n\nWe would like to invite you for an interview to discuss this opportunity further and learn more about your experience and qualifications.\n\nInterview Details:\n  Position: {job_title}\n  Round: {interview_round}\n  Mode: {interview_mode}\n  Duration: Approximately {duration} minutes\n{meeting_details}\n\nPlease confirm your availability by replying to this email within 48 hours. We are flexible with scheduling and will do our best to accommodate your preferences.\n\nWe look forward to speaking with you and learning more about how your skills and experience can contribute to our team.\n\nBest regards,\n{hr_manager_name}\nTalent Acquisition Team\n{company_name}"
+            },
+            "not_selected": {
+                "subject": "Update on Your Application - {job_title} at {company_name}",
+                "body": "Dear {candidate_name},\n\nThank you for taking the time to apply for the {job_title} position at {company_name}. We sincerely appreciate your interest in joining our organization.\n\nAfter careful consideration of all applications, we have decided to move forward with candidates whose qualifications and experience more closely match our current needs for this specific role.\n\nThis decision was difficult given the high quality of applications we received. We encourage you to explore other opportunities with {company_name} that may better align with your skills and career goals. Your resume will remain in our talent database for future consideration.\n\nWe wish you continued success in your career endeavors and hope our paths may cross again in the future.\n\nWarm regards,\n{hr_manager_name}\nHuman Resources Department\n{company_name}"
+            },
+            "screening": {
+                "subject": "Next Steps - {job_title} Application at {company_name}",
+                "body": "Dear {candidate_name},\n\nThank you for your application for the {job_title} role. We're interested in learning more about you.\n\nAs a next step, please complete a brief screening questionnaire: {screening_link}\n\nThis should take approximately 10-15 minutes. Please complete it within 3 business days.\n\nBest regards,\n{hr_manager_name}\n{company_name}"
+            },
+            "offer": {
+                "subject": "Job Offer - {job_title} at {company_name}",
+                "body": "Dear {candidate_name},\n\nWe are delighted to extend an offer for the position of {job_title} at {company_name}.\n\nKey Details:\n  Start Date: {start_date}\n  Salary: {salary_offer}\n  Benefits: {benefits}\n\nPlease review the attached offer letter and respond within 5 business days.\n\nCongratulations, and we look forward to having you on our team!\n\nBest regards,\n{hr_manager_name}\n{company_name}"
+            },
+            "interview": {
+                "subject": "Interview Invitation - {job_title} at {company_name}",
+                "body": "Dear {candidate_name},\n\nThank you for your application for the {job_title} position at {company_name}. We would like to invite you for an interview to discuss your background and the role in more detail.\n\nInterview Details:\n  Position: {job_title}\n  Round: {interview_round}\n  Mode: {interview_mode}\n  Duration: Approximately {duration} minutes\n{meeting_details}\n\nScheduled Time: {scheduled_time}\n\nIf you need to reschedule, please let us know at least 24 hours in advance.\n\nBest regards,\n{hr_manager_name}\n{company_name}"
+            }
+        },
+        "JOB_TITLE": "New Position"
+    }
+}

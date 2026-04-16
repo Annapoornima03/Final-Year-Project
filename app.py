@@ -71,8 +71,32 @@ if not os.path.exists(PERSISTENCE_DIR):
 
 def get_safe_filename(username, prefix="history"):
     """Generate a filename that's safe for Windows/Other OS even with special chars."""
-    safe_user = "".join([c if c.isalnum() else "_" for c in username])
-    return os.path.join(PERSISTENCE_DIR, f"{prefix}_{safe_user}.json")
+    if not username:
+        return None
+    
+    # Use lowercase for actual filename to avoid case-mismatch issues across sessions/query params
+    safe_user_lower = "".join([c if c.isalnum() else "_" for c in username.lower()])
+    safe_path = os.path.join(PERSISTENCE_DIR, f"{prefix}_{safe_user_lower}.json")
+    
+    # MIGRATION: Handle case-sensitive files from older versions
+    safe_user_orig = "".join([c if c.isalnum() else "_" for c in username])
+    old_path = os.path.join(PERSISTENCE_DIR, f"{prefix}_{safe_user_orig}.json")
+    
+    if old_path != safe_path and os.path.exists(old_path) and not os.path.exists(safe_path):
+        try:
+            os.rename(old_path, safe_path)
+        except:
+            pass
+            
+    # SPECIAL MIGRATION: Handle files that might have been saved with literal special chars like '@'
+    literal_path = os.path.join(PERSISTENCE_DIR, f"{prefix}_{username}.json")
+    if literal_path != safe_path and os.path.exists(literal_path) and not os.path.exists(safe_path):
+        try:
+            os.rename(literal_path, safe_path)
+        except:
+            pass
+            
+    return safe_path
 
 def save_persistence_data():
     """Save critical session state data to a per-user file for persistence across refreshes."""
@@ -81,10 +105,8 @@ def save_persistence_data():
         filename = get_safe_filename(username, "state")
         
         data = {
-            "candidates": st.session_state.get("candidates", []),
             "job_requisitions": st.session_state.get("job_requisitions", []),
             "active_job_id": st.session_state.get("active_job_id"),
-            "session_activity": st.session_state.get("session_activity", []),
             "config": st.session_state.get("config", {})
         }
         
@@ -158,15 +180,23 @@ def log_event(candidate="No candidates selected", resumes=0):
             "Time": datetime.now().strftime("%I:%M %p"),
             "HR Name": hr_name.strip(),
             "Job Title": job_title if job_title else "-",
-            "Shortlisted Candidate Name": candidate,
-            "Number of resumes uploaded": resumes,
+            "Shortlisted Candidate Name": str(candidate) if candidate else "Unknown",
+            "Number of resumes uploaded": int(resumes) if resumes else 0,
             "raw_timestamp": datetime.now().isoformat()
         }
         
         # 1. Update session state for immediate UI update
-        if "session_activity" not in st.session_state:
+        if "session_activity" not in st.session_state or st.session_state.session_activity is None:
             st.session_state.session_activity = []
-        st.session_state.session_activity.append(entry)
+        
+        # Prevent duplicate entries for the exact same event
+        session_exists = any(
+            a.get("raw_timestamp") == entry["raw_timestamp"] or 
+            (a.get("Date") == entry["Date"] and a.get("Time") == entry["Time"] and a.get("Shortlisted Candidate Name") == entry["Shortlisted Candidate Name"])
+            for a in st.session_state.session_activity
+        )
+        if not session_exists:
+            st.session_state.session_activity.append(entry)
         
         # 2. Update persistent history file (across logins)
         hist_file = get_safe_filename(username, "history")
@@ -1518,10 +1548,10 @@ def main():
     if "persistence_loaded" not in st.session_state:
         p_data = load_persistence_data(st.session_state.current_user)
         if p_data:
-            st.session_state.candidates = p_data.get("candidates", [])
+            # Note: candidates and session_activity are now session-specific and not loaded from persistence
+            # to ensure a fresh pipeline after each login/return as requested by the user.
             st.session_state.job_requisitions = p_data.get("job_requisitions", [])
             st.session_state.active_job_id = p_data.get("active_job_id")
-            st.session_state.session_activity = p_data.get("session_activity", [])
             if "config" in p_data:
                 st.session_state.config = p_data["config"]
         st.session_state.persistence_loaded = True
