@@ -65,95 +65,7 @@ def save_users(users):
     with open(USERS_FILE, 'w') as f:
         json.dump(users, f, indent=4)
 
-PERSISTENCE_DIR = os.path.abspath(os.path.join(os.getcwd(), "persistence_data"))
-if not os.path.exists(PERSISTENCE_DIR):
-    os.makedirs(PERSISTENCE_DIR)
-
-def get_safe_filename(username, prefix="history"):
-    """Generate a filename that's safe for Windows/Other OS even with special chars."""
-    if not username:
-        return None
-    
-    # Use lowercase for actual filename to avoid case-mismatch issues across sessions/query params
-    safe_user_lower = "".join([c if c.isalnum() else "_" for c in username.lower()])
-    safe_path = os.path.join(PERSISTENCE_DIR, f"{prefix}_{safe_user_lower}.json")
-    
-    # MIGRATION: Handle case-sensitive files from older versions
-    safe_user_orig = "".join([c if c.isalnum() else "_" for c in username])
-    old_path = os.path.join(PERSISTENCE_DIR, f"{prefix}_{safe_user_orig}.json")
-    
-    if old_path != safe_path and os.path.exists(old_path) and not os.path.exists(safe_path):
-        try:
-            os.rename(old_path, safe_path)
-        except:
-            pass
-            
-    # SPECIAL MIGRATION: Handle files that might have been saved with literal special chars like '@'
-    literal_path = os.path.join(PERSISTENCE_DIR, f"{prefix}_{username}.json")
-    if literal_path != safe_path and os.path.exists(literal_path) and not os.path.exists(safe_path):
-        try:
-            os.rename(literal_path, safe_path)
-        except:
-            pass
-            
-    return safe_path
-
-def save_persistence_data():
-    """Save critical session state data to a per-user file for persistence across refreshes."""
-    if st.session_state.get("logged_in") and st.session_state.get("current_user"):
-        username = st.session_state.current_user
-        filename = get_safe_filename(username, "state")
-        
-        data = {
-            "job_requisitions": st.session_state.get("job_requisitions", []),
-            "active_job_id": st.session_state.get("active_job_id"),
-            "config": st.session_state.get("config", {})
-        }
-        
-        # Handle datetime objects for JSON serialization
-        def json_serial(obj):
-            if isinstance(obj, (datetime, date)):
-                return obj.isoformat()
-            if isinstance(obj, np.integer):
-                return int(obj)
-            if isinstance(obj, np.floating):
-                return float(obj)
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()
-            raise TypeError (f"Type {type(obj)} not serializable")
-            
-        try:
-            with open(filename, 'w') as f:
-                json.dump(data, f, indent=4, default=json_serial)
-        except Exception as e:
-            logging.error(f"Persistence save failed: {e}")
-
-def load_persistence_data(username):
-    """Load session state data from a per-user file."""
-    filename = get_safe_filename(username, "state")
-    if os.path.exists(filename):
-        try:
-            with open(filename, 'r') as f:
-                data = json.load(f)
-            
-            # Convert ISO strings back to datetimes
-            if "candidates" in data:
-                for c in data["candidates"]:
-                    if "uploaded_at" in c and isinstance(c["uploaded_at"], str):
-                        c["uploaded_at"] = datetime.fromisoformat(c["uploaded_at"])
-                    if "last_updated" in c and isinstance(c["last_updated"], str):
-                        c["last_updated"] = datetime.fromisoformat(c["last_updated"])
-            
-            if "job_requisitions" in data:
-                for j in data["job_requisitions"]:
-                    if "created_at" in j and isinstance(j["created_at"], str):
-                        j["created_at"] = datetime.fromisoformat(j["created_at"])
-            
-            return data
-        except Exception as e:
-            logging.error(f"Persistence load failed: {e}")
-            return None
-    return None
+# Persistence logic removed per user request
 
 def validate_username(username):
     """Validate username contains at least one special character."""
@@ -164,69 +76,8 @@ def validate_username(username):
         return False, "Invalid Credentials"
     return True, ""
 
-def log_event(candidate="No candidates selected", resumes=0):
-    """Helper to log recruitment events with multi-session persistence."""
-    if st.session_state.get("logged_in") and st.session_state.get("current_user"):
-        username = st.session_state.current_user
-        users = load_users()
-        hr_name = users.get(username, {}).get("hr_name", username)
-        
-        # Safe access to config
-        config = st.session_state.get("config", {})
-        job_title = config.get("JOB_TITLE", "-")
-        
-        entry = {
-            "Date": datetime.now().strftime("%d-%m-%Y"),
-            "Time": datetime.now().strftime("%I:%M %p"),
-            "HR Name": hr_name.strip(),
-            "Job Title": job_title if job_title else "-",
-            "Shortlisted Candidate Name": str(candidate) if candidate else "Unknown",
-            "Number of resumes uploaded": int(resumes) if resumes else 0,
-            "raw_timestamp": datetime.now().isoformat()
-        }
-        
-        # 1. Update session state for immediate UI update
-        if "session_activity" not in st.session_state or st.session_state.session_activity is None:
-            st.session_state.session_activity = []
-        
-        # Prevent duplicate entries for the exact same event
-        session_exists = any(
-            a.get("raw_timestamp") == entry["raw_timestamp"] or 
-            (a.get("Date") == entry["Date"] and a.get("Time") == entry["Time"] and a.get("Shortlisted Candidate Name") == entry["Shortlisted Candidate Name"])
-            for a in st.session_state.session_activity
-        )
-        if not session_exists:
-            st.session_state.session_activity.append(entry)
-        
-        # 2. Update persistent history file (across logins)
-        hist_file = get_safe_filename(username, "history")
-        history = []
-        if os.path.exists(hist_file):
-            try:
-                with open(hist_file, 'r', encoding='utf-8') as f:
-                    history = json.load(f)
-            except: 
-                history = []
-        
-        # Avoid duplicate consecutive entries if UI double-triggers
-        if not history or history[-1].get("raw_timestamp") != entry["raw_timestamp"]:
-            history.append(entry)
-            
-        try:
-            with open(hist_file, 'w', encoding='utf-8') as f:
-                json.dump(history, f, indent=4)
-        except Exception as e:
-            logging.error(f"Failed to save history: {e}")
 
-def load_full_history(username):
-    """Load the full history across all login sessions for a specific HR."""
-    hist_file = get_safe_filename(username, "history")
-    if os.path.exists(hist_file):
-        try:
-            with open(hist_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except: return []
-    return []
+
 
 def validate_password(password):
     """Validate password meets security requirements."""
@@ -586,36 +437,48 @@ class LLMResumeAnalyzer:
         fallback_model = self.config.get("GROQ_FALLBACK_MODEL", "llama-3.1-8b-instant")
         
         models_to_try = [primary_model, fallback_model]
+        max_retries_per_model = 2 # Number of retries per model
         
         for i, model_name in enumerate(models_to_try):
-            try:
-                params = {
-                    "model": model_name,
-                    "messages": [
-                        {"role": "system", "content": system_message},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": temperature
-                }
-                if json_mode:
-                    params["response_format"] = {"type": "json_object"}
-                
-                completion = self.groq_client.chat.completions.create(**params)
-                return completion.choices[0].message.content
-            except Exception as e:
-                error_str = str(e).lower()
-                if "rate_limit_exceeded" in error_str or "429" in error_str:
-                    if i < len(models_to_try) - 1:
-                        logging.warning(f"Model {model_name} rate limited. Switching to fallback {models_to_try[i+1]}...")
-                        time.sleep(1) # Small pause before retry
-                        continue
+            for attempt in range(max_retries_per_model + 1):
+                try:
+                    params = {
+                        "model": model_name,
+                        "messages": [
+                            {"role": "system", "content": system_message},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "temperature": temperature
+                    }
+                    if json_mode:
+                        params["response_format"] = {"type": "json_object"}
+                    
+                    completion = self.groq_client.chat.completions.create(**params)
+                    return completion.choices[0].message.content
+                except Exception as e:
+                    error_str = str(e).lower()
+                    is_rate_limit = "rate_limit_exceeded" in error_str or "429" in error_str
+                    is_connection_error = "connection" in error_str or "connect" in error_str or "timeout" in error_str
+                    
+                    if is_rate_limit or is_connection_error:
+                        if attempt < max_retries_per_model:
+                            wait_time = (attempt + 1) * 2
+                            logging.warning(f"Groq API {model_name} error ({error_str[:30]}). Retrying in {wait_time}s... (Attempt {attempt+1}/{max_retries_per_model})")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            if i < len(models_to_try) - 1:
+                                logging.warning(f"Model {model_name} failed after retries. Switching to fallback {models_to_try[i+1]}...")
+                                break # Break inner loop, try next model
+                            else:
+                                logging.error(f"All Groq models failed: {e}")
+                                break
                     else:
-                        logging.error(f"All Groq models rate limited: {e}")
-                else:
-                    logging.error(f"Groq API error with {model_name}: {e}")
-                    if i < len(models_to_try) - 1:
-                        continue # Try fallback for other errors too
-                break
+                        logging.error(f"Groq API config/structural error with {model_name}: {e}")
+                        if i < len(models_to_try) - 1:
+                            break # Try fallback next
+                        break
+            # End of attempt loop
         return None
     
     def extract_text_from_pdf(self, uploaded_file):
@@ -626,16 +489,7 @@ class LLMResumeAnalyzer:
             file_ext = uploaded_file.name.split('.')[-1].lower() if '.' in uploaded_file.name else ""
             
         try:
-            if file_ext in ['docx', 'doc']:
-                try:
-                    import docx
-                    doc_obj = docx.Document(io.BytesIO(bytes_data))
-                    text = "\n".join([p.text for p in doc_obj.paragraphs])
-                except ImportError:
-                    logging.error("python-docx is not installed.")
-                except Exception as docx_e:
-                    logging.error(f"DOCX extraction failed: {docx_e}")
-            elif file_ext in ['png', 'jpg', 'jpeg']:
+            if file_ext in ['png', 'jpg', 'jpeg']:
                 if ocr_reader:
                     try:
                         img = Image.open(io.BytesIO(bytes_data))
@@ -650,11 +504,10 @@ class LLMResumeAnalyzer:
                     with pdfplumber.open(io.BytesIO(bytes_data)) as pdf:
                         pages_text = []
                         for page in pdf.pages:
-                            # Deduplicate overlapping characters (fixes "Aa Sshh" issue)
-                            deduped_page = page.dedupe_chars(tolerance=1)
-                            page_text = deduped_page.extract_text()
+                            page_text = page.extract_text(x_tolerance=2, y_tolerance=3)
                             if page_text:
                                 pages_text.append(page_text)
+                        
                         raw_text = "\n".join(pages_text)
                         # Clean artifacts like "Y . A S H A" or "doubled letters"
                         text = self._fix_extraction_artifacts(raw_text)
@@ -1236,13 +1089,6 @@ def render_login():
                         auto_connect_email(db_name, clean_user)
                         
                         # FRESH START ON LOGIN: Clear previous recruitment data and session state
-                        # This ensures the user starts with the "Create New Job Posting" state
-                        state_file = get_safe_filename(clean_user, "state")
-                        if os.path.exists(state_file):
-                            try:
-                                os.remove(state_file)
-                            except:
-                                pass
                         
                         # Reset session variables to ensure no old data is shown
                         st.session_state.candidates = []
@@ -1277,15 +1123,7 @@ def logout_user():
 
     # 1. DELETE temporary session state on explicit logout
     # This clears candidates/active jobs so the next session starts fresh.
-    if current_user:
-        filename = get_safe_filename(current_user, "state")
-        if os.path.exists(filename):
-            try:
-                os.remove(filename)
-            except:
-                pass
     
-    # NOTE: history_{user}.json FILES are NOT deleted, preserving Recent Activity.
 
     for key in list(st.session_state.keys()):
         del st.session_state[key]
@@ -1544,16 +1382,7 @@ def main():
         render_login()
         return
 
-    # PERSISTENCE LOAD (Only once per session initialization)
     if "persistence_loaded" not in st.session_state:
-        p_data = load_persistence_data(st.session_state.current_user)
-        if p_data:
-            # Note: candidates and session_activity are now session-specific and not loaded from persistence
-            # to ensure a fresh pipeline after each login/return as requested by the user.
-            st.session_state.job_requisitions = p_data.get("job_requisitions", [])
-            st.session_state.active_job_id = p_data.get("active_job_id")
-            if "config" in p_data:
-                st.session_state.config = p_data["config"]
         st.session_state.persistence_loaded = True
 
     # Initialize session state (if not already loaded from persistence)
@@ -1836,18 +1665,14 @@ def main():
             st.session_state.config["TOP_N_CANDIDATES"] = top_n
 
     # Initialize session-based activity tracking
-    if "session_activity" not in st.session_state:
-        st.session_state.session_activity = []
-    
-    # Main Tabs - Added Recent Activity as Tab 7
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    # Main Tabs
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         " Resume Upload",
         " Candidate Pipeline", 
         " Analytics & Reports",
         " Communication Hub",
         " Interview Scheduler",
-        " Workflow Automation",
-        " Recent Activity"
+        " Workflow Automation"
     ])
     
     with tab1:
@@ -1857,9 +1682,9 @@ def main():
         
         with col_up1:
             uploaded_files = st.file_uploader(
-                "Upload Resumes (PDF, DOCX, Images)",
+                "Upload Resumes (PDF, Images)",
                 accept_multiple_files=True,
-                type=['pdf', 'docx', 'doc', 'png', 'jpg', 'jpeg'],
+                type=['pdf', 'png', 'jpg', 'jpeg'],
                 help="Drag & drop or click to upload multiple resumes",
                 key=f"resume_uploader_{st.session_state.uploader_id}"
             )
@@ -1953,10 +1778,7 @@ def main():
                     shortlisted = len(shortlisted_list)
                     rejected = len([c for c in candidates if c["status"] == "Rejected"])
                     
-                    if shortlisted_list:
-                        # Log candidates that were automatically shortlisted during analysis
-                        names = [c["llm_analysis"].get("name", "Unknown") for c in shortlisted_list]
-                        log_event(candidate=", ".join(names), resumes=total)
+
                     
                     col_s1, col_s2, col_s3 = st.columns(3)
                     col_s1.success(f" Shortlisted: {shortlisted}")
@@ -2083,18 +1905,8 @@ def main():
                     ["Shortlisted", "Interviewing", "Offered", "Rejected"])
                 
                 if col_bulk4.button(" Update Status", width="stretch"):
-                    shortlisted_batch = []
                     for idx in selected_indices:
-                        cand_name = filtered_candidates[idx].get("llm_analysis", {}).get("name", "Unknown")
-                        if new_status == "Shortlisted" and filtered_candidates[idx].get("status") != "Shortlisted":
-                            # Collecting names for potential single-action batch log
-                            shortlisted_batch.append(cand_name)
                         filtered_candidates[idx]["status"] = new_status
-                    
-                    if shortlisted_batch:
-                        # Log the actual batch size for context
-                        batch_info = len(st.session_state.get("candidates", []))
-                        log_event(candidate=", ".join(shortlisted_batch), resumes=batch_info)
                     
                     st.success(f"Updated {len(selected_indices)} candidates to {new_status}")
                     st.rerun()
@@ -2284,11 +2096,6 @@ def main():
                             key=f"status_{selected_idx}")
                         
                         if col_act2.button(" Update", width="stretch"):
-                            cand_name = candidate.get("llm_analysis", {}).get("name", "Unknown")
-                            if new_status == "Shortlisted" and candidate.get("status") != "Shortlisted":
-                                # Track historical shortlist activity with batch context
-                                batch_info = len(st.session_state.get("candidates", []))
-                                log_event(candidate=cand_name, resumes=batch_info)
                             candidate["status"] = new_status
                             candidate["last_updated"] = datetime.now()
                             st.success(f"Status updated to {new_status}")
@@ -2841,7 +2648,7 @@ def main():
         auto_files = st.file_uploader(
             "Upload Resumes for Automation",
             accept_multiple_files=True,
-            type=['pdf', 'docx', 'doc', 'png', 'jpg', 'jpeg'],
+            type=['pdf', 'png', 'jpg', 'jpeg'],
             key="auto_uploader"
         )
 
@@ -2947,10 +2754,6 @@ def main():
                     progress_bar.progress(0.8)
 
                     if selected:
-                        # LOG AUTOMATION SHORTLISTS: Ensure candidates found via automated workflow are persisted in history
-                        shortlisted_names = [c['llm_analysis'].get('name', 'Candidate') for c in selected]
-                        log_event(candidate=", ".join(shortlisted_names), resumes=len(new_candidates))
-                        
                         top_cand = selected[0] # The one with highest score among new ones
                         status_text.markdown(f"###  Phase 3: Interview Invite for Top Candidate - **{top_cand['llm_analysis'].get('name')}**")
                         status_text.text(f"Scheduling and sending interview invite to {top_cand['llm_analysis'].get('email')}...")
@@ -3024,47 +2827,11 @@ def main():
             st.success("All data has been reset!")
             st.rerun()
 
-    with tab7:
-        st.header("  Recent Activity (Multi-Session Log)")
-        st.caption(f"Viewing session history for: **{st.session_state.current_user}**")
-        
-        # Load full history from persistent file
-        full_history = load_full_history(st.session_state.current_user)
-        
-        # Define activities to exclude to ensure only shortlisted candidates are shown
-        excluded = ["Session Started", "No candidates selected", "No candidates have been shortlisted yet.", "-", ""]
-        
-        # Filter for shortlisted candidate activities reliably
-        shortlist_history = [
-            activity for activity in full_history 
-            if activity.get("Shortlisted Candidate Name") and str(activity.get("Shortlisted Candidate Name")).strip() not in excluded
-        ]
-        
-        if not shortlist_history:
-            st.info("No candidates selected.")
-        else:
-            # Sort by raw_timestamp descending to show newest activities first
-            shortlist_history.sort(key=lambda x: x.get("raw_timestamp", ""), reverse=True)
-            
-            # Prepare data for display in a formal table
-            df_final = pd.DataFrame(shortlist_history)
-            
-            # Ensure proper schema and column order for display
-            display_cols = ["Date", "Time", "HR Name", "Job Title", "Shortlisted Candidate Name", "Number of resumes uploaded"]
-            for col in display_cols:
-                if col not in df_final.columns:
-                    df_final[col] = "-"
-            
-            # Clean up number strings and handle missing values
-            df_final["Number of resumes uploaded"] = df_final["Number of resumes uploaded"].fillna(0).astype(str).replace("-", "0").replace("nan", "0")
-            
-            # Map values to ensure clean comma-separated format is visible
-            st.table(df_final[display_cols])
+
 
     if st.session_state.get("show_logout_confirm", False) and hasattr(st, "dialog"):
         render_logout_dialog()
 
 if __name__ == "__main__":
     main()
-    # SAVE PERSISTENCE on every run
-    save_persistence_data()
+
