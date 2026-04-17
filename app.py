@@ -489,7 +489,7 @@ class LLMResumeAnalyzer:
             file_ext = uploaded_file.name.split('.')[-1].lower() if '.' in uploaded_file.name else ""
             
         try:
-            if file_ext in ['png', 'jpg', 'jpeg']:
+            if file_ext in ['jpg', 'jpeg']:
                 if ocr_reader:
                     try:
                         img = Image.open(io.BytesIO(bytes_data))
@@ -1684,7 +1684,7 @@ def main():
             uploaded_files = st.file_uploader(
                 "Upload Resumes (PDF, Images)",
                 accept_multiple_files=True,
-                type=['pdf', 'png', 'jpg', 'jpeg'],
+                type=['pdf', 'jpg', 'jpeg'],
                 help="Drag & drop or click to upload multiple resumes",
                 key=f"resume_uploader_{st.session_state.uploader_id}"
             )
@@ -2648,7 +2648,7 @@ def main():
         auto_files = st.file_uploader(
             "Upload Resumes for Automation",
             accept_multiple_files=True,
-            type=['pdf', 'png', 'jpg', 'jpeg'],
+            type=['pdf', 'jpg', 'jpeg'],
             key="auto_uploader"
         )
 
