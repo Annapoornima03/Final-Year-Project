@@ -32,8 +32,10 @@ import inspect
 from dotenv import load_dotenv
 load_dotenv()  # loads GROQ_API_KEY from .env file (never pushed to git)
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+import warnings
+warnings.filterwarnings("ignore", message=".*'pin_memory' argument is set as true but no accelerator is found.*")
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 USERS_FILE = "users.json"
 CONFIG_FILE = "config.json"
 
@@ -569,6 +571,17 @@ class LLMResumeAnalyzer:
         text = re.sub(r'\b0\s+\((\d{3})\)\s+', r'(\1) ', text)
         
         return text.strip()
+
+    def is_valid_resume(self, text: str) -> bool:
+        """Validate if the extracted text contains standard resume sections."""
+        text_lower = text.lower()
+        has_education = any(word in text_lower for word in ["education", "university", "college", "degree", "bachelor", "master", "phd", "b.tech", "b.e", "b.sc", "school", "academic"])
+        has_experience = any(word in text_lower for word in ["experience", "employment", "work history", "project", "career", "responsibilities", "work"])
+        has_skills = any(word in text_lower for word in ["skills", "technologies", "expertise", "proficiencies", "tools", "languages"])
+        has_profile = any(word in text_lower for word in ["summary", "profile", "objective", "about", "contact", "resume", "cv", "curriculum vitae"])
+        
+        valid_sections = sum([has_education, has_experience, has_skills, has_profile])
+        return valid_sections >= 2
 
     def analyze_resume_with_llm(self, resume_text: str, jd_text: str, required_skills: List[str], 
                                salary_range: Optional[Dict[str, Any]] = None, custom_criteria: str = "") -> Dict[str, Any]:
@@ -1725,8 +1738,8 @@ def main():
                         try:
                             text = st.session_state.analyzer.extract_text_from_pdf(file)
                             
-                            if not text or len(text.strip()) < 100:
-                                st.warning(f"  Insufficient text in {file.name}")
+                            if not text or len(text.strip()) < 100 or not st.session_state.analyzer.is_valid_resume(text):
+                                st.error("This is not a resume.")
                                 continue
                             
                             llm_analysis = st.session_state.analyzer.analyze_resume_with_llm(
